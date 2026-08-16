@@ -4,8 +4,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from api_server import (
+    app,
     controllers, controller_detail, command, state,
     start_training_session, get_training_session,
     CommandRequest, StartSessionRequest,
@@ -85,3 +87,13 @@ def test_state_includes_controllers():
     assert "controllers" in s
     assert "TRC 2" in s["controllers"]
     assert s["controllers"]["TRC 2"]["mode"] in ("АВТ", "РУЧ")
+
+
+def test_root_and_favicon_routes_are_not_404():
+    client = TestClient(app)
+
+    root = client.get("/")
+    assert root.status_code in (200, 307, 308)
+
+    favicon = client.get("/favicon.ico")
+    assert favicon.status_code in (200, 204)

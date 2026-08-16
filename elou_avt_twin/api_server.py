@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, Union
 import os
@@ -602,6 +603,16 @@ def _current_regulated_value(equipment_id: str) -> Optional[float]:
         if isinstance(v, (int, float)):
             return float(v)
     return None
+
+
+@app.get("/")
+def root() -> RedirectResponse:
+    return RedirectResponse(url="/docs", status_code=307)
+
+
+@app.get("/favicon.ico")
+def favicon() -> RedirectResponse:
+    return RedirectResponse(url="/docs", status_code=307)
 
 
 @app.get("/health")
