@@ -20,6 +20,7 @@ Authorization model:
 
 from __future__ import annotations
 
+import hashlib
 import os
 from typing import Optional
 
@@ -27,6 +28,11 @@ from fastapi import Depends, HTTPException, Request, status
 
 from .models import Principal
 from .store import ALL_PERMISSION_CODES, AuthService, AuthStore
+from realtime import redis_bus
+
+# Cache TTL must stay well under the token TTL (8h/28800s) so a role/perm
+# change is visible within a bounded, short staleness window.
+_PRINCIPAL_CACHE_TTL_SECONDS = 300
 
 AUTH_MODE = os.environ.get("ELOU_AUTH_MODE", "enabled").strip().lower()
 if AUTH_MODE not in {"enabled", "disabled"}:
@@ -53,11 +59,40 @@ def get_auth_service() -> AuthService:
     return _auth_service
 
 
+def _principal_cache_key(token: str) -> str:
+    return f"auth:principal:{hashlib.sha256(token.encode('utf-8')).hexdigest()}"
+
+
+def _resolve_principal(token: str) -> Optional[Principal]:
+    """Resolve a Principal from a bearer token, via a short-lived Redis cache.
+
+    Redis is only ever an optimization here: any cache error (miss, bad
+    data, connection failure) falls straight through to the DB-backed
+    lookup, and a cache-population failure is swallowed too -- an outage
+    must never break authentication.
+    """
+    cache_key = _principal_cache_key(token)
+    cached = redis_bus.cache_get_json(cache_key)
+    if cached is not None:
+        try:
+            return Principal(**cached)
+        except Exception:
+            pass  # fall through to a fresh lookup on malformed cache data
+
+    principal = _auth_service.principal_from_token(token)
+    if principal is not None:
+        redis_bus.cache_set_json(cache_key, principal.model_dump(), _PRINCIPAL_CACHE_TTL_SECONDS)
+        redis_bus.remember_principal_cache_key(
+            principal.username, cache_key, _PRINCIPAL_CACHE_TTL_SECONDS
+        )
+    return principal
+
+
 def get_current_user(request: Request) -> Principal:
     header = request.headers.get("Authorization", "")
     if header.lower().startswith("bearer "):
         token = header[7:].strip()
-        principal = _auth_service.principal_from_token(token)
+        principal = _resolve_principal(token)
         if principal is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -90,7 +125,7 @@ def require_permission(code: str):
 
 def authenticate_websocket(token: str) -> Optional[Principal]:
     """Resolve a WebSocket caller from its handshake credential."""
-    principal = _auth_service.principal_from_token(token) if token else None
+    principal = _resolve_principal(token) if token else None
     if AUTH_MODE == "disabled":
         return _system_principal
     if principal is None:

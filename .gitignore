@@ -35,3 +35,10 @@ elou_avt_web/dist/
 dist/
 *.tsbuildinfo
 *.tsbuildinfo.json
+
+# ---- Docker stack (docker-compose.yml) ----
+# Postgres host bind-mount data directory (see docker-compose.yml `db` service)
+data/
+# Docker Secrets source files (see docker-compose.yml top-level `secrets:` and
+# start.sh/start.ps1, which generate these) -- real credentials, never commit.
+secrets/

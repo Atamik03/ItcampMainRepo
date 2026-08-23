@@ -48,9 +48,13 @@ def _json_dump(value: Any) -> str:
 
 
 def _rows(conn: sqlite3.Connection, table: str, session_id: str, order: str) -> list[dict[str, Any]]:
+    # Every call site below passes hardcoded literal strings for `table`
+    # and `order` (this is an offline maintainer CLI, not reachable from
+    # any live API); `session_id`, the only externally-supplied value,
+    # is properly bound as a real ? parameter.
     if not _table_exists(conn, table) or "session_id" not in _columns(conn, table):
         return []
-    query = f'SELECT * FROM "{table}" WHERE session_id = ? ORDER BY {order}'
+    query = f'SELECT * FROM "{table}" WHERE session_id = ? ORDER BY {order}'  # nosec B608
     return [dict(row) for row in conn.execute(query, (session_id,)).fetchall()]
 
 

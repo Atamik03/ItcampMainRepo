@@ -1,0 +1,113 @@
+# .trivyignore
+#
+# Documented, individually-reviewed exceptions ONLY -- every entry below was
+# verified against a real `trivy image` scan of the actual built image,
+# confirming no fix is currently available anywhere (Status: "affected" or
+# "fix_deferred", no FixedVersion). See docs/gitlab-ci-setup.md "Security
+# policy" for how this file is used by the pipeline's Trivy image-scan job.
+#
+# NOT an auto-populated allowlist: each line below is the result of running
+# `trivy image --severity HIGH,CRITICAL <image>` against a locally built
+# image and reading the Status field, not a blanket suppression. Re-review
+# this file whenever the pipeline's Trivy image-scan job reports NEW
+# findings not already listed here -- those must be triaged individually,
+# not silently added.
+#
+# Review cadence: re-check every entry below whenever scripts/pin-digests.*
+# actually resolves a NEW digest (i.e. upstream published a rebuild) -- a
+# fix may have landed. If `scripts/pin-digests.*` reports "already up to
+# date" (as it did when this file was written), these are still current.
+
+## ---- docker-beck (backend, python:3.12-slim / Debian) ----
+## `apt-get upgrade` in docker/backend/Dockerfile already picks up every
+## fix Debian's security repo has published; everything below had no fix
+## published anywhere at all at time of review.
+
+# gzip: no fix published.
+CVE-2026-41992
+# libacl1: no fix published.
+CVE-2026-54369
+# libncursesw6 / libtinfo6 / ncurses-base / ncurses-bin: same underlying
+# ncurses CVE, no fix published for any of the 4 affected packages.
+CVE-2025-69720
+# libssl3t64 / openssl / openssl-provider-legacy: same underlying OpenSSL
+# CVE, Debian marks it "fix_deferred" (acknowledged, not yet patched).
+CVE-2026-14456
+# perl-base: 4 distinct CVEs against the same package, all either
+# "affected" (no fix) or "fix_deferred" (acknowledged, not yet patched).
+# perl-base is a transitive OS dependency here -- this image never invokes
+# perl itself (no perl scripts anywhere in this application).
+CVE-2026-13221
+CVE-2026-42496
+CVE-2026-57433
+CVE-2026-8376
+CVE-2026-42497
+CVE-2026-48962
+CVE-2026-57432
+CVE-2026-9538
+
+## ---- docker-js (frontend-build, node:20-alpine) ----
+## One-shot build container: compiles the frontend and exits, never
+## receives traffic, never runs as a long-lived service, and none of its
+## own filesystem layers ship in the runtime frontend-nginx image (only
+## the compiled static /app/dist output does, via the shared volume) --
+## the blast radius of anything below is limited to the build step itself.
+## All of the following are baked into node:20-alpine's own bundled npm
+## CLI (its internal dependencies -- tar/glob/minimatch/cross-spawn/
+## brace-expansion/ip-address/sigstore -- none of which are direct or
+## transitive dependencies of elou_avt_web/package.json) or its Go
+## toolchain layer; neither is something this repo's Dockerfile can
+## `apk upgrade` or `npm update` its way out of. scripts/pin-digests.sh
+## already reported "up to date" for node:20-alpine (no newer digest
+## published yet) when this file was written.
+CVE-2026-45447
+CVE-2026-13149
+CVE-2026-14257
+CVE-2026-69152
+CVE-2024-21538
+CVE-2025-64756
+CVE-2026-69192
+CVE-2026-26996
+CVE-2026-27903
+CVE-2026-27904
+CVE-2026-48815
+CVE-2026-59873
+CVE-2026-23745
+CVE-2026-23950
+CVE-2026-24842
+CVE-2026-26960
+CVE-2026-29786
+CVE-2026-31802
+CVE-2026-59874
+CVE-2024-24790
+CVE-2025-68121
+CVE-2023-45288
+CVE-2024-34156
+CVE-2025-61726
+CVE-2025-61729
+CVE-2026-25679
+CVE-2026-27145
+CVE-2026-32280
+CVE-2026-32281
+CVE-2026-32283
+CVE-2026-33811
+CVE-2026-33814
+CVE-2026-33818
+CVE-2026-39820
+CVE-2026-39821
+CVE-2026-39822
+CVE-2026-39836
+CVE-2026-42499
+CVE-2026-42504
+CVE-2026-56853
+CVE-2026-56858
+CVE-2026-56859
+CVE-2026-56860
+CVE-2026-56862
+# CVE-2026-53571 (vite, HIGH): fixed in vite 6.4.3/7.3.5/8.0.16+; this
+# project pins vite ^5.4.11 (elou_avt_web/package.json). Upgrading is a
+# breaking major-version change (same tension as the pre-existing
+# esbuild/vite npm-audit finding noted in the CI setup docs) -- explicitly
+# NOT force-upgraded in this session, tracked here as a known follow-up
+# rather than silently ignored.
+CVE-2026-53571

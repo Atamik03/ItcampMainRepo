@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+sessions.db
+sessions.db-wal
+sessions.db-shm
+.auth_secret
+*.db
+.pytest_cache/
+tests/
+.git
+# NOTE: patterns are relative to the build context root (repo root when used
+# via `docker compose build`, per docker-compose.yml `context: .`), not to
+# this file's own directory -- matches the root .dockerignore.
+.env
+.env.*
+secrets/

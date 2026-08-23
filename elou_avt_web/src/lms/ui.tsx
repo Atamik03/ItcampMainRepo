@@ -247,7 +247,7 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[]) {
     return () => {
       seq.current += 1;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [reload]);
 
   return { data, error, loading, reload };

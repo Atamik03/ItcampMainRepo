@@ -26,11 +26,13 @@ import logging
 import os
 import re
 import secrets
-import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Union
+
+from persistence import db as _db
+from realtime import redis_bus
 
 from .models import (
     LoginResponse,
@@ -53,10 +55,14 @@ DEFAULT_SECRET_PATH = Path(__file__).resolve().parent.parent / ".auth_secret"
 def _load_token_secret(explicit: Optional[str] = None) -> str:
     """Resolve the signing secret without shipping a universal demo secret.
 
-    Production requires ``ELOU_AUTH_SECRET``.  Local MVP runs generate a
-    strong per-installation secret once, which keeps the one-click demo login
-    working while preventing tokens from one copy of the project being valid
-    in every other copy.
+    Production requires either ``ELOU_AUTH_SECRET`` or an explicitly-set
+    ``ELOU_AUTH_SECRET_FILE`` pointing at a real secret (e.g. a mounted
+    Docker/Compose secret file) -- both count as "a secret was actually
+    supplied". Local MVP runs with neither set generate a strong
+    per-installation secret once (written to the *default* secret file
+    path), which keeps the one-click demo login working while preventing
+    tokens from one copy of the project being valid in every other copy;
+    that auto-generate fallback is deliberately refused in production.
     """
     secret = explicit or os.environ.get("ELOU_AUTH_SECRET", "").strip()
     environment = os.environ.get("ELOU_ENV", "development").strip().lower()
@@ -64,10 +70,20 @@ def _load_token_secret(explicit: Optional[str] = None) -> str:
         if len(secret) < 32:
             raise RuntimeError("ELOU_AUTH_SECRET must contain at least 32 characters")
         return secret
-    if environment in {"prod", "production"}:
-        raise RuntimeError("ELOU_AUTH_SECRET is required in production")
 
-    path = Path(os.environ.get("ELOU_AUTH_SECRET_FILE", str(DEFAULT_SECRET_PATH)))
+    explicit_secret_file = os.environ.get("ELOU_AUTH_SECRET_FILE", "").strip()
+    if explicit_secret_file:
+        from_file = Path(explicit_secret_file).read_text(encoding="utf-8").strip()
+        if len(from_file) < 32:
+            raise RuntimeError(
+                f"ELOU_AUTH_SECRET_FILE={explicit_secret_file} must contain at least 32 characters"
+            )
+        return from_file
+
+    if environment in {"prod", "production"}:
+        raise RuntimeError("ELOU_AUTH_SECRET or ELOU_AUTH_SECRET_FILE is required in production")
+
+    path = Path(str(DEFAULT_SECRET_PATH))
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         existing = path.read_text(encoding="utf-8").strip()
@@ -227,6 +243,40 @@ CREATE TABLE IF NOT EXISTS user_roles (
 );
 """
 
+_SCHEMA_POSTGRES = """
+CREATE TABLE IF NOT EXISTS roles (
+    code        TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS permissions (
+    code        TEXT PRIMARY KEY,
+    description TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS role_permissions (
+    role_code       TEXT NOT NULL REFERENCES roles(code) ON DELETE CASCADE,
+    permission_code TEXT NOT NULL REFERENCES permissions(code) ON DELETE CASCADE,
+    PRIMARY KEY (role_code, permission_code)
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id            INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    username      TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    full_name     TEXT NOT NULL DEFAULT '',
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    created_at    DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_roles (
+    user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role_code TEXT NOT NULL REFERENCES roles(code) ON DELETE CASCADE,
+    PRIMARY KEY (user_id, role_code)
+);
+"""
+
 
 class AuthStore:
     """SQLite-backed RBAC store (roles, permissions, users, bindings)."""
@@ -235,13 +285,9 @@ class AuthStore:
         self._path = Path(path) if path else DEFAULT_DB_PATH
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = _db.connect(path, DEFAULT_DB_PATH)
         with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL;")
-            self._conn.execute("PRAGMA busy_timeout=5000;")
-            self._conn.execute("PRAGMA foreign_keys=ON;")
-            self._conn.executescript(_SCHEMA)
+            self._conn.executescript(_SCHEMA if self._conn.dialect == "sqlite" else _SCHEMA_POSTGRES)
             self._conn.commit()
         logger.info("AuthStore opened: %s", self._path)
 
@@ -262,7 +308,8 @@ class AuthStore:
         with self._lock, self._conn:
             for code, desc in PERMISSIONS.items():
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO permissions (code, description) VALUES (?, ?)",
+                    f"{self._conn.ignore_prefix()} permissions (code, description) "
+                    f"VALUES (?, ?){self._conn.ignore_suffix('code')}",
                     (code, desc),
                 )
             # Устаревшие роли (методолог, технолог, аналитик ИИ, экзаменатор)
@@ -270,7 +317,11 @@ class AuthStore:
             # созданные администратором, не удаляются. Связи
             # role_permissions/user_roles слетают по CASCADE.
             self._conn.execute(
-                "DELETE FROM roles WHERE code IN (%s)"
+                # The interpolated part is only a "?,?,?" placeholder-count
+                # string sized off len(LEGACY_ROLE_CODES), a fixed
+                # module-level constant list; every actual value is still
+                # bound as a real ? parameter below, not interpolated.
+                "DELETE FROM roles WHERE code IN (%s)"  # nosec B608
                 % ",".join("?" * len(LEGACY_ROLE_CODES)),
                 LEGACY_ROLE_CODES,
             )
@@ -281,7 +332,8 @@ class AuthStore:
             )
             for code, name in ROLE_LABELS.items():
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO roles (code, name, description) VALUES (?, ?, ?)",
+                    f"{self._conn.ignore_prefix()} roles (code, name, description) "
+                    f"VALUES (?, ?, ?){self._conn.ignore_suffix('code')}",
                     (code, name, ROLE_DESCRIPTIONS.get(code, "")),
                 )
             for role, codes in ROLE_PERMISSIONS.items():
@@ -294,7 +346,8 @@ class AuthStore:
                 )
                 for perm in codes:
                     self._conn.execute(
-                        "INSERT OR IGNORE INTO role_permissions (role_code, permission_code) VALUES (?, ?)",
+                        f"{self._conn.ignore_prefix()} role_permissions (role_code, permission_code) "
+                        f"VALUES (?, ?){self._conn.ignore_suffix('role_code, permission_code')}",
                         (role, perm),
                     )
             self._conn.commit()
@@ -309,12 +362,11 @@ class AuthStore:
                 ).fetchone()
                 if row is None:
                     now = time.time()
-                    cur = self._conn.execute(
+                    user_id = self._conn.insert_returning_id(
                         "INSERT INTO users (username, password_hash, full_name, is_active, created_at) "
                         "VALUES (?, ?, ?, 1, ?)",
                         (username, hash_password(password), full_name, now),
                     )
-                    user_id = cur.lastrowid
                 else:
                     user_id = row["id"]
                     self._conn.execute(
@@ -323,7 +375,8 @@ class AuthStore:
                     )
                 for role in roles:
                     self._conn.execute(
-                        "INSERT OR IGNORE INTO user_roles (user_id, role_code) VALUES (?, ?)",
+                        f"{self._conn.ignore_prefix()} user_roles (user_id, role_code) "
+                        f"VALUES (?, ?){self._conn.ignore_suffix('user_id, role_code')}",
                         (user_id, role),
                     )
             self._conn.commit()
@@ -349,12 +402,11 @@ class AuthStore:
     def create_user(self, data: UserCreate) -> UserView:
         with self._lock, self._conn:
             now = time.time()
-            cur = self._conn.execute(
+            user_id = self._conn.insert_returning_id(
                 "INSERT INTO users (username, password_hash, full_name, is_active, created_at) "
                 "VALUES (?, ?, ?, 1, ?)",
                 (data.username, hash_password(data.password), data.full_name, now),
             )
-            user_id = cur.lastrowid
             self._bind_roles_locked(user_id, data.role_codes)
             self._conn.commit()
         return self.user_view(user_id)
@@ -366,12 +418,18 @@ class AuthStore:
                 (1 if is_active else 0, user_id),
             )
             self._conn.commit()
+        user = self.get_user(user_id)
+        if user is not None:
+            redis_bus.invalidate_principal_cache(user["username"])
 
     def set_user_roles(self, user_id: int, role_codes: List[str]) -> UserView:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM user_roles WHERE user_id = ?", (user_id,))
             self._bind_roles_locked(user_id, role_codes)
             self._conn.commit()
+        user = self.get_user(user_id)
+        if user is not None:
+            redis_bus.invalidate_principal_cache(user["username"])
         return self.user_view(user_id)
 
     def _bind_roles_locked(self, user_id: int, role_codes: List[str]) -> None:
@@ -383,7 +441,8 @@ class AuthStore:
         for role in role_codes:
             if role in known:
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO user_roles (user_id, role_code) VALUES (?, ?)",
+                    f"{self._conn.ignore_prefix()} user_roles (user_id, role_code) "
+                    f"VALUES (?, ?){self._conn.ignore_suffix('user_id, role_code')}",
                     (user_id, role),
                 )
 
@@ -405,7 +464,7 @@ class AuthStore:
                 perms = [p["permission_code"] for p in self._conn.execute(
                     "SELECT permission_code FROM role_permissions WHERE role_code = ? ORDER BY permission_code",
                     (r["code"],),
-                )]
+                ).fetchall()]
                 out.append(RoleView(
                     code=r["code"], name=r["name"], description=r["description"], permissions=perms,
                 ))
@@ -479,6 +538,11 @@ class AuthStore:
             )
             self._bind_permissions_locked(code, permission_codes)
             self._conn.commit()
+        # A role can be held by many users and the Principal cache is keyed
+        # by token hash (not username), so precise invalidation here would
+        # require a role -> users reverse index. Skip it: cached Principals
+        # naturally expire within _PRINCIPAL_CACHE_TTL_SECONDS (5 min, see
+        # auth/deps.py), which is the accepted staleness bound for this case.
         return self.role_view(code)
 
     def delete_role(self, code: str) -> None:
@@ -497,7 +561,8 @@ class AuthStore:
         for perm in permission_codes:
             if perm in known:
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO role_permissions (role_code, permission_code) VALUES (?, ?)",
+                    f"{self._conn.ignore_prefix()} role_permissions (role_code, permission_code) "
+                    f"VALUES (?, ?){self._conn.ignore_suffix('role_code, permission_code')}",
                     (role_code, perm),
                 )
 
@@ -511,7 +576,7 @@ class AuthStore:
             perms = [p["permission_code"] for p in self._conn.execute(
                 "SELECT permission_code FROM role_permissions WHERE role_code = ? ORDER BY permission_code",
                 (code,),
-            )]
+            ).fetchall()]
             return RoleView(
                 code=row["code"], name=row["name"], description=row["description"], permissions=perms,
             )

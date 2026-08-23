@@ -233,7 +233,7 @@ export default function PracticeRunner() {
       alive = false;
       window.clearInterval(t);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, []);
 
   const confirmPractice = useCallback(async () => {

@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, Union
+import asyncio
+import json
 import os
 import threading
 import time
@@ -20,8 +22,6 @@ from models.scenario import Scenario
 from simulation_core.digital_twin import DigitalTwin
 from scheme import (
     ProcessScheme,
-    SchemeNode,
-    SchemeEdge,
     load_scheme,
     save_scheme,
     migrate_scheme_data,
@@ -44,9 +44,14 @@ from auth.models import (
 from lms.api import router as lms_router
 from lms.content_api import router as lms_content_router
 from lms import runtime as lms_runtime
-from lms.chat_hub import broadcast as chat_broadcast, register as chat_register, unregister as chat_unregister
+from lms.chat_hub import (
+    register as chat_register,
+    unregister as chat_unregister,
+    redis_listener as chat_redis_listener,
+)
 from lms.content_store import LmsContentStore
 from lms.scenario_service import to_engine_scenario
+from realtime import redis_bus
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("elou_avt.api")
@@ -1367,15 +1372,24 @@ async def websocket_simulation(websocket: WebSocket):
         await websocket.close(code=4403)
         return
     await websocket.accept(subprotocol=subprotocol)
+    pubsub = None
     try:
-        while True:
-            payload = _snapshot_state()
-            if payload is None:
-                with lock:
-                    _refresh_snapshot()
-                    payload = _snapshot_state()
+        payload = _snapshot_state()
+        if payload is None:
+            with lock:
+                _refresh_snapshot()
+                payload = _snapshot_state()
+        if payload is not None:
             await websocket.send_json(payload)
-            await __import__("asyncio").sleep(1.0)
+        pubsub = await redis_bus.subscribe(SIM_SNAPSHOT_CHANNEL)
+        async for message in pubsub.listen():
+            if message is None or message.get("type") != "message":
+                continue
+            try:
+                payload = json.loads(message["data"])
+            except Exception:
+                continue
+            await websocket.send_json(payload)
     except WebSocketDisconnect:
         return
     except Exception:
@@ -1384,6 +1398,13 @@ async def websocket_simulation(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
+    finally:
+        if pubsub is not None:
+            try:
+                await pubsub.unsubscribe(SIM_SNAPSHOT_CHANNEL)
+                await pubsub.close()
+            except Exception:
+                pass
 
 
 @app.websocket("/ws/chat")
@@ -1433,6 +1454,30 @@ _simulation_stop = threading.Event()
 _simulation_thread: Optional[threading.Thread] = None
 _simulation_thread_lock = threading.Lock()
 
+SIM_SNAPSHOT_CHANNEL = "sim:snapshot"
+# Set once in `_lifespan` at startup so `simulation_loop` (a plain background
+# thread, not an asyncio task) can hand work back to the main event loop via
+# `asyncio.run_coroutine_threadsafe` -- mirrors how `lms/chat_hub.py` captures
+# its own `_loop`.
+_main_event_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _publish_snapshot(payload: Dict[str, Any]) -> None:
+    """Fire-and-forget publish of the simulation snapshot to Redis.
+
+    Called from `simulation_loop`, which runs in a plain thread -- never
+    `await` here; schedule the coroutine on the captured main loop instead.
+    """
+    loop = _main_event_loop
+    if loop is None or loop.is_closed():
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(
+            redis_bus.publish_json(SIM_SNAPSHOT_CHANNEL, payload), loop
+        )
+    except Exception:
+        logger.warning("Failed to schedule sim snapshot publish", exc_info=True)
+
 
 def simulation_loop(stop_event: threading.Event):
     """Advance the simulation by 1.0 s whole steps at a rate of speed * real time.
@@ -1468,6 +1513,9 @@ def simulation_loop(stop_event: threading.Event):
             # Rebuild the read-path snapshot so polling endpoints / the
             # WebSocket serve the fresh state without blocking on this step.
             _refresh_snapshot()
+            snapshot_payload = _snapshot_state()
+        if snapshot_payload is not None:
+            _publish_snapshot(snapshot_payload)
         elapsed = time.monotonic() - t0
         # Симуляция отстаёт от реального времени (шаг дольше 1 реальной
         # секунды): долг не копим, иначе следующий тик стартует пачку
@@ -1524,12 +1572,21 @@ def _preload_error_cause_model() -> None:
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
+    global _main_event_loop
+    _main_event_loop = asyncio.get_event_loop()
     _start_simulation_thread()
     threading.Thread(target=_preload_error_cause_model, name="ml-preload", daemon=True).start()
+    chat_listener_task = asyncio.create_task(chat_redis_listener())
     try:
         yield
     finally:
         _stop_simulation_thread()
+        chat_listener_task.cancel()
+        try:
+            await chat_listener_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _main_event_loop = None
 
 
 app.router.lifespan_context = _lifespan

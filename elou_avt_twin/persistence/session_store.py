@@ -20,9 +20,7 @@ session can be fully reconstructed and exported for offline AI analysis.
 
 from __future__ import annotations
 
-import json
 import logging
-import sqlite3
 import threading
 import time
 import uuid
@@ -30,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 from models.base import Alarm, ErrorEvent, OperatorAction, SimulationState
+from . import db as _db
 
 logger = logging.getLogger("elou_avt.session_store")
 
@@ -193,22 +192,170 @@ CREATE TABLE IF NOT EXISTS alarm_setpoints (
 );
 """
 
+_SCHEMA_POSTGRES = """
+CREATE TABLE IF NOT EXISTS sessions (
+    id             TEXT PRIMARY KEY,
+    scenario_id    TEXT NOT NULL,
+    operator_id    TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'CREATED',
+    sim_start      DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    sim_end        DOUBLE PRECISION,
+    wall_start     DOUBLE PRECISION NOT NULL,
+    wall_end       DOUBLE PRECISION,
+    scheme_version TEXT,
+    performance_score DOUBLE PRECISION,
+    qualification  TEXT,
+    ai_verdict     TEXT,
+    participants   TEXT NOT NULL DEFAULT '[]',
+    created_at     DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS actions (
+    id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    session_id  TEXT NOT NULL REFERENCES sessions(id),
+    seq         INTEGER NOT NULL,
+    sim_time    DOUBLE PRECISION NOT NULL,
+    wall_time   DOUBLE PRECISION,
+    operator_id TEXT NOT NULL,
+    equipment_id TEXT NOT NULL,
+    node_type   TEXT,
+    action_type TEXT NOT NULL,
+    old_value   TEXT,
+    new_value   TEXT,
+    source      TEXT NOT NULL DEFAULT 'operator_panel',
+    accepted    INTEGER NOT NULL DEFAULT 1,
+    reject_reason TEXT,
+    UNIQUE (session_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS state_snapshots (
+    id             INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    session_id     TEXT NOT NULL REFERENCES sessions(id),
+    seq            INTEGER NOT NULL,
+    sim_time       DOUBLE PRECISION NOT NULL,
+    wall_time      DOUBLE PRECISION,
+    reason         TEXT NOT NULL DEFAULT 'step',
+    action_id      INTEGER REFERENCES actions(id),
+    pressure       TEXT,
+    temperature    TEXT,
+    levels         TEXT,
+    flows          TEXT,
+    pump_states    TEXT,
+    valve_positions TEXT,
+    equipment_states TEXT,
+    controller_states TEXT,
+    active_alarms  TEXT,
+    active_failures TEXT,
+    UNIQUE (session_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS alarms (
+    id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    session_id  TEXT NOT NULL REFERENCES sessions(id),
+    alarm_id    TEXT NOT NULL,
+    parameter   TEXT,
+    severity    TEXT,
+    actual_value DOUBLE PRECISION,
+    threshold   DOUBLE PRECISION,
+    description TEXT,
+    raised_at   DOUBLE PRECISION NOT NULL,
+    acked_at    DOUBLE PRECISION,
+    acked_by    TEXT,
+    cleared_at  DOUBLE PRECISION,
+    UNIQUE (session_id, alarm_id, raised_at)
+);
+
+CREATE TABLE IF NOT EXISTS error_events (
+    id                  INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    session_id          TEXT NOT NULL REFERENCES sessions(id),
+    sim_time            DOUBLE PRECISION NOT NULL,
+    action_id           INTEGER REFERENCES actions(id),
+    rule_error_type     TEXT NOT NULL,
+    severity            TEXT,
+    expected_action     TEXT,
+    cause               TEXT,
+    consequence         TEXT,
+    context_snapshot_id INTEGER REFERENCES state_snapshots(id),
+    ai_class            TEXT,
+    ai_confidence       DOUBLE PRECISION,
+    ai_reasoning        TEXT,
+    ai_status           TEXT NOT NULL DEFAULT 'pending'
+);
+
+CREATE TABLE IF NOT EXISTS expected_actions (
+    id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    scenario_id TEXT NOT NULL,
+    equipment_id TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    value       TEXT,
+    deadline_t  DOUBLE PRECISION,
+    description TEXT,
+    consequence TEXT,
+    weight      DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+    UNIQUE (scenario_id, equipment_id, action_type)
+);
+
+CREATE TABLE IF NOT EXISTS ai_classifications (
+    id               INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    session_id       TEXT NOT NULL REFERENCES sessions(id),
+    error_event_id   INTEGER REFERENCES error_events(id),
+    model            TEXT NOT NULL,
+    prompt_version   TEXT,
+    input_payload    TEXT NOT NULL,
+    predicted_class  TEXT NOT NULL,
+    confidence       DOUBLE PRECISION,
+    reasoning        TEXT,
+    human_correction TEXT,
+    human_corrected  INTEGER NOT NULL DEFAULT 0,
+    latency_ms       DOUBLE PRECISION,
+    created_at       DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS session_cause_reviews (
+    session_id              TEXT PRIMARY KEY REFERENCES sessions(id),
+    feature_schema_version  TEXT NOT NULL,
+    features_json           TEXT NOT NULL,
+    model_name              TEXT NOT NULL,
+    model_status            TEXT NOT NULL,
+    predictions_json        TEXT NOT NULL DEFAULT '[]',
+    inference_latency_ms    DOUBLE PRECISION,
+    operator_answers_json   TEXT,
+    operator_selected_cause TEXT,
+    operator_reviewed_at    DOUBLE PRECISION,
+    instructor_id           TEXT,
+    instructor_agrees       INTEGER,
+    instructor_causes_json  TEXT,
+    instructor_reviewed_at  DOUBLE PRECISION,
+    created_at              DOUBLE PRECISION NOT NULL,
+    updated_at              DOUBLE PRECISION NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_actions_session     ON actions (session_id, seq);
+CREATE INDEX IF NOT EXISTS idx_snapshots_session   ON state_snapshots (session_id, sim_time);
+CREATE INDEX IF NOT EXISTS idx_alarms_session      ON alarms (session_id, raised_at);
+CREATE INDEX IF NOT EXISTS idx_errors_session      ON error_events (session_id, sim_time);
+CREATE INDEX IF NOT EXISTS idx_errors_pending      ON error_events (ai_status);
+CREATE INDEX IF NOT EXISTS idx_expected_scenario   ON expected_actions (scenario_id);
+CREATE INDEX IF NOT EXISTS idx_ai_session          ON ai_classifications (session_id);
+CREATE INDEX IF NOT EXISTS idx_cause_review_status ON session_cause_reviews (model_status);
+
+CREATE TABLE IF NOT EXISTS alarm_setpoints (
+    parameter    TEXT PRIMARY KEY,
+    low_low      DOUBLE PRECISION,
+    low          DOUBLE PRECISION,
+    high         DOUBLE PRECISION,
+    high_high    DOUBLE PRECISION,
+    unit         TEXT,
+    updated_at   DOUBLE PRECISION NOT NULL
+);
+"""
+
 _ACTION_TABLES = ("actions", "state_snapshots")
 
 
-def _json(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    return json.dumps(value, ensure_ascii=False, default=str)
-
-
-def _unjson(text: Optional[str], default: Any = None) -> Any:
-    if text is None:
-        return default
-    try:
-        return json.loads(text)
-    except (TypeError, ValueError):
-        return default
+# Shared with lms/store.py and lms/content_store.py -- see persistence/db.py.
+_json = _db.json_dump
+_unjson = _db.json_load
 
 
 _JSON_COLUMNS = {
@@ -251,20 +398,19 @@ class SessionStore:
         if create_dir:
             self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = _db.connect(path, DEFAULT_DB_PATH)
         with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL;")
-            self._conn.execute("PRAGMA busy_timeout=5000;")
-            self._conn.execute("PRAGMA foreign_keys=ON;")
-            self._conn.executescript(_SCHEMA)
+            self._conn.executescript(_SCHEMA if self._conn.dialect == "sqlite" else _SCHEMA_POSTGRES)
             self._migrate()
             self._conn.commit()
-        logger.info("SessionStore opened: %s", self._path)
+        logger.info("SessionStore opened: %s (%s)", self._path, self._conn.dialect)
 
     def _migrate(self) -> None:
-        """Add missing columns to existing tables."""
-        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(sessions)")]
+        """Add missing columns to existing tables (SQLite only; Postgres gets
+        the current schema from _SCHEMA_POSTGRES on first create)."""
+        if self._conn.dialect != "sqlite":
+            return
+        cols = [r["name"] for r in self._conn.execute("PRAGMA table_info(sessions)").fetchall()]
         if "participants" not in cols:
             self._conn.execute(
                 "ALTER TABLE sessions ADD COLUMN participants TEXT NOT NULL DEFAULT '[]'"
@@ -289,11 +435,14 @@ class SessionStore:
     # ------------------------------------------------------------------
 
     def _next_seq(self, session_id: str, table: str) -> int:
+        # `table` is only ever called with the two hardcoded literal
+        # strings below ("actions", "state_snapshots") -- never with
+        # external/user-supplied input.
         row = self._conn.execute(
-            f"SELECT COALESCE(MAX(seq), 0) + 1 FROM {table} WHERE session_id = ?",
+            f"SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM {table} WHERE session_id = ?",  # nosec B608
             (session_id,),
         ).fetchone()
-        return int(row[0])
+        return int(row["next_seq"])
 
     def _touch(self, sql: str, params: tuple) -> None:
         with self._lock, self._conn:
@@ -419,7 +568,7 @@ class SessionStore:
         """Append one operator action to the session log. Returns row id."""
         with self._lock, self._conn:
             seq = self._next_seq(session_id, "actions")
-            cur = self._conn.execute(
+            row_id = self._conn.insert_returning_id(
                 "INSERT INTO actions (session_id, seq, sim_time, wall_time, operator_id, "
                 "equipment_id, node_type, action_type, old_value, new_value, source, "
                 "accepted, reject_reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -439,7 +588,6 @@ class SessionStore:
                     reject_reason,
                 ),
             )
-            row_id = int(cur.lastrowid)
         logger.debug("Action logged: %s on %s", action.action_type, action.equipment_id)
         return row_id
 
@@ -467,7 +615,7 @@ class SessionStore:
         t = sim_time if sim_time is not None else state.timestamp
         with self._lock, self._conn:
             seq = self._next_seq(session_id, "state_snapshots")
-            cur = self._conn.execute(
+            row_id = self._conn.insert_returning_id(
                 "INSERT INTO state_snapshots (session_id, seq, sim_time, wall_time, reason, "
                 "action_id, pressure, temperature, levels, flows, pump_states, valve_positions, "
                 "equipment_states, controller_states, active_alarms, active_failures) "
@@ -491,7 +639,6 @@ class SessionStore:
                     _json(state.active_failures),
                 ),
             )
-            row_id = int(cur.lastrowid)
         return row_id
 
     def get_snapshots(self, session_id: str) -> List[Dict[str, Any]]:
@@ -525,7 +672,7 @@ class SessionStore:
             ).fetchone()
             if existing:
                 return int(existing["id"])
-            cur = self._conn.execute(
+            return self._conn.insert_returning_id(
                 "INSERT INTO alarms (session_id, alarm_id, parameter, severity, actual_value, "
                 "threshold, description, raised_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -539,7 +686,6 @@ class SessionStore:
                     alarm.timestamp,
                 ),
             )
-            return int(cur.lastrowid)
 
     def update_alarm_event(
         self,
@@ -563,8 +709,11 @@ class SessionStore:
         if not fields:
             return
         params.extend((session_id, alarm_id))
+        # `fields` entries are the three hardcoded literal strings above
+        # ("acked_at=?", "acked_by=?", "cleared_at=?") -- never derived
+        # from external/user-supplied column names.
         self._touch(
-            f"UPDATE alarms SET {', '.join(fields)} "
+            f"UPDATE alarms SET {', '.join(fields)} "  # nosec B608
             "WHERE session_id=? AND alarm_id=? AND cleared_at IS NULL",
             tuple(params),
         )
@@ -590,7 +739,7 @@ class SessionStore:
     ) -> int:
         """Record a rule-detected operator error. Returns row id."""
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            return self._conn.insert_returning_id(
                 "INSERT INTO error_events (session_id, sim_time, action_id, rule_error_type, "
                 "severity, expected_action, cause, consequence, context_snapshot_id, ai_status) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -607,7 +756,6 @@ class SessionStore:
                     ai_status,
                 ),
             )
-            return int(cur.lastrowid)
 
     def get_errors(self, session_id: str) -> List[Dict[str, Any]]:
         rows = self._conn.execute(
@@ -658,7 +806,7 @@ class SessionStore:
     ) -> int:
         """Audit one AI classification call. This row is the labelled dataset."""
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            return self._conn.insert_returning_id(
                 "INSERT INTO ai_classifications (session_id, error_event_id, model, prompt_version, "
                 "input_payload, predicted_class, confidence, reasoning, latency_ms, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -675,7 +823,6 @@ class SessionStore:
                     time.time(),
                 ),
             )
-            return int(cur.lastrowid)
 
     def get_classifications(self, session_id: str) -> List[Dict[str, Any]]:
         rows = self._conn.execute(
@@ -747,10 +894,14 @@ class SessionStore:
         """Insert ground-truth reference actions for a scenario (idempotent)."""
         count = 0
         with self._lock, self._conn:
+            insert_sql = (
+                f"{self._conn.ignore_prefix()} expected_actions (scenario_id, equipment_id, action_type, "
+                "value, deadline_t, description, consequence, weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                f"{self._conn.ignore_suffix('scenario_id, equipment_id, action_type')}"
+            )
             for ra in reference_actions:
                 cur = self._conn.execute(
-                    "INSERT OR IGNORE INTO expected_actions (scenario_id, equipment_id, action_type, "
-                    "value, deadline_t, description, consequence, weight) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    insert_sql,
                     (
                         scenario_id,
                         ra.get("equipment", ra.get("equipment_id", ra.get("object_id", ""))),

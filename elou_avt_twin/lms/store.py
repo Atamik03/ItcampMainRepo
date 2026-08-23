@@ -19,28 +19,22 @@ Tables:
 
 from __future__ import annotations
 
-import json
 import logging
-import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from persistence import db as _db
+
 from .models import (
     Competency,
-    Course,
-    CourseModule,
-    CourseStatus,
     GroupCreate,
-    GroupMembersRequest,
     GroupUpdate,
     ModuleCreate,
     ModuleStatus,
-    PracticeTask,
     TaskCreate,
     TaskUpdate,
-    UserCompetency,
     UserProgress,
 )
 
@@ -164,38 +158,146 @@ CREATE INDEX IF NOT EXISTS idx_lms_notify_user     ON lms_notifications (user_id
 CREATE INDEX IF NOT EXISTS idx_lms_log_time        ON lms_system_log (timestamp);
 """
 
+_SCHEMA_POSTGRES = """
+CREATE TABLE IF NOT EXISTS lms_groups (
+    id           INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    course_id    INTEGER,
+    instructor_id INTEGER,
+    created_at   DOUBLE PRECISION NOT NULL
+);
 
-def _json(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    return json.dumps(value, ensure_ascii=False)
+CREATE TABLE IF NOT EXISTS lms_group_members (
+    group_id INTEGER NOT NULL REFERENCES lms_groups(id) ON DELETE CASCADE,
+    user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS lms_courses (
+    id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    title       TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status      TEXT NOT NULL DEFAULT 'DRAFT',
+    created_at  DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lms_course_modules (
+    id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    course_id   INTEGER NOT NULL REFERENCES lms_courses(id) ON DELETE CASCADE,
+    kind        TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    seq         INTEGER NOT NULL DEFAULT 0,
+    content     TEXT NOT NULL DEFAULT '',
+    scenario_id TEXT,
+    practice_task_id INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS lms_competencies (
+    code        TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS lms_user_competencies (
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    competency_code TEXT NOT NULL REFERENCES lms_competencies(code) ON DELETE CASCADE,
+    level_percent   DOUBLE PRECISION NOT NULL DEFAULT 0,
+    updated_at      DOUBLE PRECISION NOT NULL,
+    PRIMARY KEY (user_id, competency_code)
+);
+
+CREATE TABLE IF NOT EXISTS lms_practice_tasks (
+    id                   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    title                TEXT NOT NULL,
+    description          TEXT NOT NULL DEFAULT '',
+    scenario_id          TEXT NOT NULL,
+    category             TEXT NOT NULL DEFAULT 'practice',
+    difficulty           TEXT NOT NULL DEFAULT 'MIDDLE',
+    duration_min         INTEGER NOT NULL DEFAULT 10,
+    required_competencies TEXT NOT NULL DEFAULT '[]',
+    is_random            INTEGER NOT NULL DEFAULT 0,
+    enabled              INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS lms_user_progress (
+    user_id                 INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    module_id               INTEGER NOT NULL REFERENCES lms_course_modules(id) ON DELETE CASCADE,
+    status                  TEXT NOT NULL DEFAULT 'NOT_STARTED',
+    score                   DOUBLE PRECISION,
+    attempts                INTEGER NOT NULL DEFAULT 0,
+    completed_at            DOUBLE PRECISION,
+    last_practice_session_id TEXT,
+    PRIMARY KEY (user_id, module_id)
+);
+
+CREATE TABLE IF NOT EXISTS lms_notifications (
+    id         INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    text       TEXT NOT NULL,
+    kind       TEXT NOT NULL DEFAULT 'info',
+    is_read    INTEGER NOT NULL DEFAULT 0,
+    created_at DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lms_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS lms_system_log (
+    id        INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    timestamp DOUBLE PRECISION NOT NULL,
+    level     TEXT NOT NULL DEFAULT 'INFO',
+    username  TEXT NOT NULL DEFAULT '',
+    message   TEXT NOT NULL,
+    category  TEXT NOT NULL DEFAULT 'system'
+);
+
+CREATE TABLE IF NOT EXISTS lms_chat_messages (
+    id         INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    author     TEXT NOT NULL DEFAULT '',
+    kind       TEXT NOT NULL DEFAULT 'text',
+    object_id  TEXT NOT NULL DEFAULT '',
+    text       TEXT NOT NULL DEFAULT '',
+    created_at DOUBLE PRECISION NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_lms_chat_session ON lms_chat_messages (session_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_lms_modules_course  ON lms_course_modules (course_id, seq);
+CREATE INDEX IF NOT EXISTS idx_lms_progress_user   ON lms_user_progress (user_id);
+CREATE INDEX IF NOT EXISTS idx_lms_members_group   ON lms_group_members (group_id);
+CREATE INDEX IF NOT EXISTS idx_lms_notify_user     ON lms_notifications (user_id, is_read);
+CREATE INDEX IF NOT EXISTS idx_lms_log_time        ON lms_system_log (timestamp);
+"""
 
 
-def _unjson(text: Optional[str], default: Any = None) -> Any:
-    if text is None:
-        return default
-    try:
-        return json.loads(text)
-    except (TypeError, ValueError):
-        return default
+# Shared with persistence/session_store.py and lms/content_store.py -- see
+# persistence/db.py. NOTE: this previously omitted `default=str` (unlike the
+# other two copies) -- consolidating onto the shared helper aligns it with
+# the majority behavior (falls back to str() for non-JSON-native values
+# instead of raising), which only changes behavior on inputs that would
+# previously have raised TypeError.
+_json = _db.json_dump
+_unjson = _db.json_load
 
 
 class LmsStore:
     """SQLite-backed store for the LMS layer."""
 
     def __init__(self, path: Optional[Union[Path, str]] = None):
-        self._path = Path(path) if path else DEFAULT_DB_PATH
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = _db.connect(path, DEFAULT_DB_PATH)
         with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL;")
-            self._conn.execute("PRAGMA busy_timeout=5000;")
-            self._conn.execute("PRAGMA foreign_keys=ON;")
-            self._conn.executescript(_SCHEMA)
+            self._conn.executescript(
+                _SCHEMA if self._conn.dialect == "sqlite" else _SCHEMA_POSTGRES
+            )
             self._conn.commit()
-        logger.info("LmsStore opened: %s", self._path)
+        logger.info("LmsStore opened: %s (%s)", self._path, self._conn.dialect)
 
     @classmethod
     def in_memory(cls) -> "LmsStore":
@@ -219,8 +321,8 @@ class LmsStore:
         with self._lock, self._conn:
             for c in items:
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO lms_competencies (code, title, description) "
-                    "VALUES (?, ?, ?)",
+                    f"{self._conn.ignore_prefix()} lms_competencies (code, title, description) "
+                    f"VALUES (?, ?, ?){self._conn.ignore_suffix('code')}",
                     (c.code, c.title, c.description),
                 )
             self._conn.commit()
@@ -292,14 +394,17 @@ class LmsStore:
 
     def create_course(self, title: str, description: str = "", status: str = "DRAFT") -> int:
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_courses (title, description, status, created_at) VALUES (?, ?, ?, ?)",
                 (title, description, status, time.time()),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def update_course(self, course_id: int, fields: Dict[str, Any]) -> None:
+        # Column names are filtered through the fixed `allowed` whitelist
+        # below before being interpolated, so no external/user-supplied
+        # key can ever reach the SQL text.
         allowed = {"title", "description", "status"}
         sets = [f"{k} = ?" for k in fields if k in allowed]
         if not sets:
@@ -307,7 +412,7 @@ class LmsStore:
         params = [fields[k] for k in fields if k in allowed] + [course_id]
         with self._lock, self._conn:
             self._conn.execute(
-                f"UPDATE lms_courses SET {', '.join(sets)} WHERE id = ?", tuple(params)
+                f"UPDATE lms_courses SET {', '.join(sets)} WHERE id = ?", tuple(params)  # nosec B608
             )
             self._conn.commit()
 
@@ -333,18 +438,18 @@ class LmsStore:
         with self._lock, self._conn:
             if seq is None:
                 row = self._conn.execute(
-                    "SELECT COALESCE(MAX(seq), -1) + 1 FROM lms_course_modules WHERE course_id = ?",
+                    "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq FROM lms_course_modules WHERE course_id = ?",
                     (course_id,),
                 ).fetchone()
-                seq = int(row[0])
-            cur = self._conn.execute(
+                seq = int(row["next_seq"])
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_course_modules (course_id, kind, title, description, seq, content, "
                 "scenario_id, practice_task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (course_id, m.kind.value if hasattr(m.kind, "value") else m.kind,
                  m.title, m.description, seq, m.content, m.scenario_id, m.practice_task_id),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def get_modules(self, course_id: int) -> List[Dict[str, Any]]:
         with self._lock:
@@ -372,7 +477,7 @@ class LmsStore:
 
     def create_task(self, t: TaskCreate) -> int:
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_practice_tasks (title, description, scenario_id, category, "
                 "difficulty, duration_min, required_competencies, is_random, enabled) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -383,7 +488,7 @@ class LmsStore:
                  1 if t.is_random else 0, 1 if t.enabled else 0),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def update_task(self, task_id: int, u: TaskUpdate) -> None:
         fields: Dict[str, Any] = {}
@@ -407,10 +512,13 @@ class LmsStore:
             fields["enabled"] = 1 if u.enabled else 0
         if not fields:
             return
+        # `fields` keys are literal strings assigned by this function's own
+        # code above (never derived from external/user-supplied field
+        # names), so there is no injectable column-name path here.
         sets = ", ".join(f"{k} = ?" for k in fields)
         with self._lock, self._conn:
             self._conn.execute(
-                f"UPDATE lms_practice_tasks SET {sets} WHERE id = ?",
+                f"UPDATE lms_practice_tasks SET {sets} WHERE id = ?",  # nosec B608
                 tuple(list(fields.values()) + [task_id]),
             )
             self._conn.commit()
@@ -447,13 +555,13 @@ class LmsStore:
 
     def create_group(self, g: GroupCreate, instructor_id: int) -> int:
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_groups (name, description, course_id, instructor_id, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (g.name, g.description, g.course_id, instructor_id, time.time()),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def update_group(self, group_id: int, u: GroupUpdate) -> None:
         fields: Dict[str, Any] = {}
@@ -465,10 +573,13 @@ class LmsStore:
             fields["course_id"] = u.course_id
         if not fields:
             return
+        # `fields` keys are literal strings assigned by this function's own
+        # code above (never derived from external/user-supplied field
+        # names), so there is no injectable column-name path here.
         sets = ", ".join(f"{k} = ?" for k in fields)
         with self._lock, self._conn:
             self._conn.execute(
-                f"UPDATE lms_groups SET {sets} WHERE id = ?",
+                f"UPDATE lms_groups SET {sets} WHERE id = ?",  # nosec B608
                 tuple(list(fields.values()) + [group_id]),
             )
             self._conn.commit()
@@ -497,7 +608,8 @@ class LmsStore:
             self._conn.execute("DELETE FROM lms_group_members WHERE group_id = ?", (group_id,))
             for uid in user_ids:
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO lms_group_members (group_id, user_id) VALUES (?, ?)",
+                    f"{self._conn.ignore_prefix()} lms_group_members (group_id, user_id) VALUES (?, ?)"
+                    f"{self._conn.ignore_suffix('group_id, user_id')}",
                     (group_id, uid),
                 )
             self._conn.commit()
@@ -506,7 +618,8 @@ class LmsStore:
         with self._lock, self._conn:
             for uid in user_ids:
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO lms_group_members (group_id, user_id) VALUES (?, ?)",
+                    f"{self._conn.ignore_prefix()} lms_group_members (group_id, user_id) VALUES (?, ?)"
+                    f"{self._conn.ignore_suffix('group_id, user_id')}",
                     (group_id, uid),
                 )
             self._conn.commit()
@@ -638,13 +751,13 @@ class LmsStore:
 
     def add_notification(self, user_id: int, text: str, kind: str = "info") -> int:
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_notifications (user_id, text, kind, is_read, created_at) "
                 "VALUES (?, ?, ?, 0, ?)",
                 (user_id, text, kind, time.time()),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def list_notifications(self, user_id: int, limit: int = 50) -> List[Dict[str, Any]]:
         with self._lock:
@@ -692,7 +805,9 @@ class LmsStore:
         with self._lock, self._conn:
             for k, v in defaults.items():
                 self._conn.execute(
-                    "INSERT OR IGNORE INTO lms_settings (key, value) VALUES (?, ?)", (k, v)
+                    f"{self._conn.ignore_prefix()} lms_settings (key, value) VALUES (?, ?)"
+                    f"{self._conn.ignore_suffix('key')}",
+                    (k, v),
                 )
             self._conn.commit()
 
@@ -703,13 +818,13 @@ class LmsStore:
     def add_log(self, message: str, level: str = "INFO", username: str = "",
                 category: str = "system") -> int:
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_system_log (timestamp, level, username, message, category) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (time.time(), level, username, message, category),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def list_logs(self, limit: int = 200) -> List[Dict[str, Any]]:
         with self._lock:
@@ -726,14 +841,14 @@ class LmsStore:
                          object_id: str, text: str) -> Dict[str, Any]:
         now = time.time()
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_chat_messages (session_id, author, kind, object_id, text, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (session_id, author, kind, object_id, text, now),
             )
             self._conn.commit()
             return {
-                "id": int(cur.lastrowid),
+                "id": new_id,
                 "session_id": session_id,
                 "author": author,
                 "kind": kind,

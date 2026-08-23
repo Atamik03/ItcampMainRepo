@@ -44,7 +44,6 @@ from .models import (
     ProfileView,
     Recommendation,
     StudyGroup,
-    GroupMembersRequest,
 )
 from .content_store import LmsContentStore
 from .store import LmsStore

@@ -1,0 +1,24 @@
+# .hadolint.yaml
+#
+# Documented, reviewed exceptions only -- never auto-populated. See
+# docs/gitlab-ci-setup.md "Security policy" for how this file is used by
+# the pipeline's `hadolint` job.
+ignored:
+  # DL3008 (docker/backend/Dockerfile): "Pin versions in apt get install"
+  # for `build-essential`/`gcc`. Deliberately NOT pinned:
+  #   1. These packages are installed only in the `builder` stage and never
+  #      cross into the final runtime image (see the Dockerfile's own
+  #      comment above that RUN instruction) -- they don't affect what
+  #      actually ships, only what compiles numpy/scikit-learn/scipy if no
+  #      prebuilt wheel matches the target Python/arch.
+  #   2. Exact apt package version pins on a Debian slim base are
+  #      genuinely brittle in practice: Debian's mirrors rotate old
+  #      package versions out fairly quickly (faster than most people
+  #      re-pin Dockerfiles), so a hardcoded version here would eventually
+  #      break `docker build` outright with "package not found", which is
+  #      a worse failure mode than an unpinned compiler toolchain version.
+  #   3. Reproducibility where it actually matters is already covered:
+  #      the base image itself is pinned by immutable digest (see
+  #      scripts/pin-digests.*), and all Python dependencies are
+  #      version-range-pinned in elou_avt_twin/requirements.txt.
+  - DL3008

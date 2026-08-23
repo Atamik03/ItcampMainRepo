@@ -20,25 +20,20 @@ Also adds the `published` flag to lms_course_modules (модуль: чернов
 
 from __future__ import annotations
 
-import json
 import logging
-import sqlite3
 import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from persistence import db as _db
+
 from .content_models import (
     Assessment,
-    Lesson,
     LessonWrite,
-    Question,
     QuestionWrite,
-    ScenarioDefinition,
     ScenarioWrite,
-    TestConfig,
     TestWrite,
-    TrainingTask,
     TaskWrite,
 )
 
@@ -60,7 +55,7 @@ CREATE TABLE IF NOT EXISTS lms_lessons (
 
 CREATE TABLE IF NOT EXISTS lms_tests (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    module_id        INTEGER NOT NULL REFERENCES lms_course_modules(id) ON DELETE CASCADE,
+    module_id        INTEGER NOT NULL UNIQUE REFERENCES lms_course_modules(id) ON DELETE CASCADE,
     title            TEXT NOT NULL DEFAULT 'Контроль знаний',
     passing_score    REAL NOT NULL DEFAULT 70,
     attempts         INTEGER NOT NULL DEFAULT 0,
@@ -87,7 +82,7 @@ CREATE TABLE IF NOT EXISTS lms_questions (
 
 CREATE TABLE IF NOT EXISTS lms_training_tasks (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    module_id        INTEGER NOT NULL REFERENCES lms_course_modules(id) ON DELETE CASCADE,
+    module_id        INTEGER NOT NULL UNIQUE REFERENCES lms_course_modules(id) ON DELETE CASCADE,
     title            TEXT NOT NULL,
     goal             TEXT NOT NULL DEFAULT '',
     scenario_id      TEXT NOT NULL DEFAULT '',
@@ -106,7 +101,7 @@ CREATE TABLE IF NOT EXISTS lms_training_tasks (
 
 CREATE TABLE IF NOT EXISTS lms_scenarios (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
-    module_id        INTEGER NOT NULL REFERENCES lms_course_modules(id) ON DELETE CASCADE,
+    module_id        INTEGER NOT NULL UNIQUE REFERENCES lms_course_modules(id) ON DELETE CASCADE,
     title            TEXT NOT NULL,
     description      TEXT NOT NULL DEFAULT '',
     goal             TEXT NOT NULL DEFAULT '',
@@ -190,20 +185,154 @@ CREATE INDEX IF NOT EXISTS idx_scada_log_time  ON lms_scada_log (timestamp);
 CREATE INDEX IF NOT EXISTS idx_scada_log_user  ON lms_scada_log (username, timestamp);
 """
 
+_SCHEMA_POSTGRES = """
+CREATE TABLE IF NOT EXISTS lms_lessons (
+    id               INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    module_id        INTEGER NOT NULL REFERENCES lms_course_modules(id) ON DELETE CASCADE,
+    title            TEXT NOT NULL,
+    seq              INTEGER NOT NULL DEFAULT 0,
+    blocks           TEXT NOT NULL DEFAULT '[]',
+    equipment_ids    TEXT NOT NULL DEFAULT '[]',
+    competency_codes TEXT NOT NULL DEFAULT '[]',
+    created_at       DOUBLE PRECISION NOT NULL
+);
 
-def _json(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    return json.dumps(value, ensure_ascii=False, default=str)
+CREATE TABLE IF NOT EXISTS lms_tests (
+    id               INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    module_id        INTEGER NOT NULL UNIQUE REFERENCES lms_course_modules(id) ON DELETE CASCADE,
+    title            TEXT NOT NULL DEFAULT 'Контроль знаний',
+    passing_score    DOUBLE PRECISION NOT NULL DEFAULT 70,
+    attempts         INTEGER NOT NULL DEFAULT 0,
+    retry_required   INTEGER NOT NULL DEFAULT 0,
+    shuffle          INTEGER NOT NULL DEFAULT 0,
+    competency_codes TEXT NOT NULL DEFAULT '[]',
+    created_at       DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lms_questions (
+    id        INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    test_id   INTEGER NOT NULL REFERENCES lms_tests(id) ON DELETE CASCADE,
+    kind      TEXT NOT NULL,
+    title     TEXT NOT NULL,
+    text      TEXT NOT NULL DEFAULT '',
+    seq       INTEGER NOT NULL DEFAULT 0,
+    options   TEXT NOT NULL DEFAULT '[]',
+    answer    TEXT,
+    max_score DOUBLE PRECISION NOT NULL DEFAULT 1,
+    penalty   DOUBLE PRECISION NOT NULL DEFAULT 0,
+    required  INTEGER NOT NULL DEFAULT 1,
+    hint      TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS lms_training_tasks (
+    id               INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    module_id        INTEGER NOT NULL UNIQUE REFERENCES lms_course_modules(id) ON DELETE CASCADE,
+    title            TEXT NOT NULL,
+    goal             TEXT NOT NULL DEFAULT '',
+    scenario_id      TEXT NOT NULL DEFAULT '',
+    duration_min     INTEGER NOT NULL DEFAULT 10,
+    initial_state    TEXT NOT NULL DEFAULT '{}',
+    target_state     TEXT NOT NULL DEFAULT '[]',
+    restrictions     TEXT NOT NULL DEFAULT '[]',
+    criteria         TEXT NOT NULL DEFAULT '[]',
+    expected_actions TEXT NOT NULL DEFAULT '[]',
+    critical_errors  TEXT NOT NULL DEFAULT '[]',
+    competency_codes TEXT NOT NULL DEFAULT '[]',
+    equipment_ids    TEXT NOT NULL DEFAULT '[]',
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    created_at       DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lms_scenarios (
+    id               INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    module_id        INTEGER NOT NULL UNIQUE REFERENCES lms_course_modules(id) ON DELETE CASCADE,
+    title            TEXT NOT NULL,
+    description      TEXT NOT NULL DEFAULT '',
+    goal             TEXT NOT NULL DEFAULT '',
+    status           TEXT NOT NULL DEFAULT 'DRAFT',
+    initial_state    TEXT NOT NULL DEFAULT '{}',
+    events           TEXT NOT NULL DEFAULT '[]',
+    expected_actions TEXT NOT NULL DEFAULT '[]',
+    success_criteria TEXT NOT NULL DEFAULT '[]',
+    critical_errors  TEXT NOT NULL DEFAULT '[]',
+    target_state     TEXT NOT NULL DEFAULT '[]',
+    field_errors     TEXT NOT NULL DEFAULT '[]',
+    final_state      TEXT NOT NULL DEFAULT '{}',
+    competency_codes TEXT NOT NULL DEFAULT '[]',
+    equipment_ids    TEXT NOT NULL DEFAULT '[]',
+    duration_min     INTEGER NOT NULL DEFAULT 10,
+    is_exam          INTEGER NOT NULL DEFAULT 0,
+    multi_operator   INTEGER NOT NULL DEFAULT 0,
+    created_at       DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lms_assessments (
+    id                   INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id              INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    module_id            INTEGER NOT NULL REFERENCES lms_course_modules(id) ON DELETE CASCADE,
+    kind                 TEXT NOT NULL,
+    test_id              INTEGER,
+    task_id              INTEGER,
+    scenario_id          TEXT,
+    score                DOUBLE PRECISION NOT NULL DEFAULT 0,
+    max_score            DOUBLE PRECISION NOT NULL DEFAULT 100,
+    passed               INTEGER NOT NULL DEFAULT 0,
+    criteria_scores      TEXT NOT NULL DEFAULT '{}',
+    errors_count         INTEGER NOT NULL DEFAULT 0,
+    critical_errors_count INTEGER NOT NULL DEFAULT 0,
+    duration_s           DOUBLE PRECISION NOT NULL DEFAULT 0,
+    answers              TEXT,
+    feedback_good        TEXT NOT NULL DEFAULT '[]',
+    feedback_bad         TEXT NOT NULL DEFAULT '[]',
+    session_id           TEXT,
+    started_at           DOUBLE PRECISION NOT NULL,
+    finished_at          DOUBLE PRECISION NOT NULL,
+    created_at           DOUBLE PRECISION NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lms_action_log (
+    id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    timestamp   DOUBLE PRECISION NOT NULL,
+    user_id     INTEGER,
+    username    TEXT NOT NULL DEFAULT '',
+    object_id   TEXT NOT NULL DEFAULT '',
+    object_name TEXT NOT NULL DEFAULT '',
+    action      TEXT NOT NULL DEFAULT '',
+    old_state   TEXT NOT NULL DEFAULT '{}',
+    new_state   TEXT NOT NULL DEFAULT '{}',
+    source      TEXT NOT NULL DEFAULT 'operator_panel',
+    session_id  TEXT,
+    module_id   INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS lms_scada_log (
+    id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    timestamp   DOUBLE PRECISION NOT NULL,
+    user_id     INTEGER,
+    username    TEXT NOT NULL DEFAULT '',
+    event_type  TEXT NOT NULL DEFAULT 'click',
+    object_id   TEXT NOT NULL DEFAULT '',
+    object_name TEXT NOT NULL DEFAULT '',
+    duration_s  DOUBLE PRECISION,
+    session_id  TEXT,
+    module_id   INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_lessons_module  ON lms_lessons (module_id, seq);
+CREATE INDEX IF NOT EXISTS idx_questions_test  ON lms_questions (test_id, seq);
+CREATE INDEX IF NOT EXISTS idx_tasks_module    ON lms_training_tasks (module_id);
+CREATE INDEX IF NOT EXISTS idx_scenarios_mod   ON lms_scenarios (module_id);
+CREATE INDEX IF NOT EXISTS idx_assess_user     ON lms_assessments (user_id, finished_at);
+CREATE INDEX IF NOT EXISTS idx_assess_module   ON lms_assessments (module_id);
+CREATE INDEX IF NOT EXISTS idx_action_log_time ON lms_action_log (timestamp);
+CREATE INDEX IF NOT EXISTS idx_scada_log_time  ON lms_scada_log (timestamp);
+CREATE INDEX IF NOT EXISTS idx_scada_log_user  ON lms_scada_log (username, timestamp);
+"""
 
 
-def _unjson(text: Optional[str], default: Any = None) -> Any:
-    if text is None:
-        return default
-    try:
-        return json.loads(text)
-    except (TypeError, ValueError):
-        return default
+# Shared with persistence/session_store.py and lms/store.py -- see persistence/db.py.
+_json = _db.json_dump
+_unjson = _db.json_load
 
 
 def _normalize_question_data(q: Dict[str, Any]) -> tuple:
@@ -285,22 +414,19 @@ class LmsContentStore:
     """SQLite-backed store for the authoring & study system."""
 
     def __init__(self, path: Optional[Union[Path, str]] = None):
-        self._path = Path(path) if path else DEFAULT_DB_PATH
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path = path
         self._lock = threading.RLock()
-        self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+        self._conn = _db.connect(path, DEFAULT_DB_PATH)
         with self._lock:
-            self._conn.execute("PRAGMA journal_mode=WAL;")
-            self._conn.execute("PRAGMA busy_timeout=5000;")
-            self._conn.execute("PRAGMA foreign_keys=ON;")
-            self._conn.executescript(_SCHEMA)
+            self._conn.executescript(
+                _SCHEMA if self._conn.dialect == "sqlite" else _SCHEMA_POSTGRES
+            )
             self._migrate_module_published()
             self._migrate_scenario_target_state()
             self._migrate_scenario_field_errors()
             self._migrate_scenario_multi_operator()
             self._conn.commit()
-        logger.info("LmsContentStore opened: %s", self._path)
+        logger.info("LmsContentStore opened: %s (%s)", self._path, self._conn.dialect)
 
     @classmethod
     def in_memory(cls) -> "LmsContentStore":
@@ -311,6 +437,13 @@ class LmsContentStore:
             self._conn.close()
 
     def _migrate_module_published(self) -> None:
+        # Postgres always gets `published` from _SCHEMA_POSTGRES on first
+        # create; PRAGMA table_info / ALTER TABLE ADD COLUMN below are
+        # SQLite-only runtime migrations for pre-existing local dev DBs.
+        if self._conn.dialect != "sqlite":
+            return
+        import sqlite3
+
         cols = {r["name"] for r in self._conn.execute(
             "PRAGMA table_info(lms_course_modules)").fetchall()}
         if "published" not in cols:
@@ -321,6 +454,10 @@ class LmsContentStore:
                 logger.debug("migration published: column already exists")
 
     def _migrate_scenario_target_state(self) -> None:
+        if self._conn.dialect != "sqlite":
+            return
+        import sqlite3
+
         cols = {r["name"] for r in self._conn.execute(
             "PRAGMA table_info(lms_scenarios)").fetchall()}
         if "target_state" not in cols:
@@ -331,6 +468,10 @@ class LmsContentStore:
                 logger.debug("migration target_state: column already exists")
 
     def _migrate_scenario_field_errors(self) -> None:
+        if self._conn.dialect != "sqlite":
+            return
+        import sqlite3
+
         cols = {r["name"] for r in self._conn.execute(
             "PRAGMA table_info(lms_scenarios)").fetchall()}
         if "field_errors" not in cols:
@@ -341,6 +482,10 @@ class LmsContentStore:
                 logger.debug("migration field_errors: column already exists")
 
     def _migrate_scenario_multi_operator(self) -> None:
+        if self._conn.dialect != "sqlite":
+            return
+        import sqlite3
+
         cols = {r["name"] for r in self._conn.execute(
             "PRAGMA table_info(lms_scenarios)").fetchall()}
         if "multi_operator" not in cols:
@@ -377,18 +522,18 @@ class LmsContentStore:
         with self._lock, self._conn:
             if seq is None:
                 row = self._conn.execute(
-                    "SELECT COALESCE(MAX(seq), -1) + 1 FROM lms_lessons WHERE module_id = ?",
+                    "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq FROM lms_lessons WHERE module_id = ?",
                     (module_id,),
                 ).fetchone()
-                seq = int(row[0])
-            cur = self._conn.execute(
+                seq = int(row["next_seq"])
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_lessons (module_id, title, seq, blocks, equipment_ids, "
                 "competency_codes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (module_id, w.title, seq, _json([b.model_dump() for b in w.blocks]),
                  _json(w.equipment_ids), _json(w.competency_codes), time.time()),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def update_lesson(self, lesson_id: int, w: LessonWrite) -> None:
         with self._lock, self._conn:
@@ -431,29 +576,28 @@ class LmsContentStore:
     # ------------------------------------------------------------------
 
     def upsert_test(self, module_id: int, w: TestWrite) -> int:
+        # Single atomic INSERT ... ON CONFLICT(module_id) DO UPDATE ... RETURNING id
+        # instead of SELECT-then-branch: safe under concurrent writers on
+        # Postgres (the in-process RLock only serializes this one process).
+        # `module_id` carries a UNIQUE constraint in both _SCHEMA and
+        # _SCHEMA_POSTGRES for lms_tests. Syntax is valid on SQLite 3.35+
+        # and Postgres alike, so no dialect branch is needed here.
         with self._lock, self._conn:
             row = self._conn.execute(
-                "SELECT id FROM lms_tests WHERE module_id = ?", (module_id,)
-            ).fetchone()
-            if row:
-                self._conn.execute(
-                    "UPDATE lms_tests SET title = ?, passing_score = ?, attempts = ?, "
-                    "retry_required = ?, shuffle = ?, competency_codes = ? WHERE id = ?",
-                    (w.title, w.passing_score, w.attempts, 1 if w.retry_required else 0,
-                     1 if w.shuffle else 0, _json(w.competency_codes), int(row["id"])),
-                )
-                self._conn.commit()
-                return int(row["id"])
-            cur = self._conn.execute(
                 "INSERT INTO lms_tests (module_id, title, passing_score, attempts, "
                 "retry_required, shuffle, competency_codes, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(module_id) DO UPDATE SET "
+                "title = excluded.title, passing_score = excluded.passing_score, "
+                "attempts = excluded.attempts, retry_required = excluded.retry_required, "
+                "shuffle = excluded.shuffle, competency_codes = excluded.competency_codes "
+                "RETURNING id",
                 (module_id, w.title, w.passing_score, w.attempts,
                  1 if w.retry_required else 0, 1 if w.shuffle else 0,
                  _json(w.competency_codes), time.time()),
-            )
+            ).fetchone()
             self._conn.commit()
-            return int(cur.lastrowid)
+            return int(row["id"])
 
     def delete_test(self, test_id: int) -> None:
         with self._lock, self._conn:
@@ -500,18 +644,18 @@ class LmsContentStore:
     def create_question(self, test_id: int, w: QuestionWrite) -> int:
         with self._lock, self._conn:
             row = self._conn.execute(
-                "SELECT COALESCE(MAX(seq), -1) + 1 FROM lms_questions WHERE test_id = ?",
+                "SELECT COALESCE(MAX(seq), -1) + 1 AS next_seq FROM lms_questions WHERE test_id = ?",
                 (test_id,),
             ).fetchone()
-            seq = int(row[0])
-            cur = self._conn.execute(
+            seq = int(row["next_seq"])
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_questions (test_id, kind, title, text, seq, options, answer, "
                 "max_score, penalty, required, hint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (test_id, w.kind.value, w.title, w.text, seq, _json(w.options), _json(w.answer),
                  w.max_score, w.penalty, 1 if w.required else 0, w.hint),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def update_question(self, question_id: int, w: QuestionWrite) -> None:
         with self._lock, self._conn:
@@ -586,10 +730,10 @@ class LmsContentStore:
     # ------------------------------------------------------------------
 
     def upsert_task(self, module_id: int, w: TaskWrite) -> int:
+        # Atomic INSERT ... ON CONFLICT(module_id) DO UPDATE ... RETURNING id;
+        # see upsert_test for rationale. `module_id` is UNIQUE on
+        # lms_training_tasks in both _SCHEMA and _SCHEMA_POSTGRES.
         with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT id FROM lms_training_tasks WHERE module_id = ?", (module_id,)
-            ).fetchone()
             values = (
                 w.title, w.goal, w.scenario_id, w.duration_min, _json(w.initial_state),
                 _json([c.model_dump() for c in w.target_state]),
@@ -599,25 +743,23 @@ class LmsContentStore:
                 _json([r.model_dump() for r in w.critical_errors]),
                 _json(w.competency_codes), _json(w.equipment_ids), 1 if w.enabled else 0,
             )
-            if row:
-                self._conn.execute(
-                    "UPDATE lms_training_tasks SET title = ?, goal = ?, scenario_id = ?, "
-                    "duration_min = ?, initial_state = ?, target_state = ?, restrictions = ?, "
-                    "criteria = ?, expected_actions = ?, critical_errors = ?, competency_codes = ?, "
-                    "equipment_ids = ?, enabled = ? WHERE id = ?",
-                    values + (int(row["id"]),),
-                )
-                self._conn.commit()
-                return int(row["id"])
-            cur = self._conn.execute(
+            row = self._conn.execute(
                 "INSERT INTO lms_training_tasks (module_id, title, goal, scenario_id, duration_min, "
                 "initial_state, target_state, restrictions, criteria, expected_actions, "
                 "critical_errors, competency_codes, equipment_ids, enabled, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(module_id) DO UPDATE SET "
+                "title = excluded.title, goal = excluded.goal, scenario_id = excluded.scenario_id, "
+                "duration_min = excluded.duration_min, initial_state = excluded.initial_state, "
+                "target_state = excluded.target_state, restrictions = excluded.restrictions, "
+                "criteria = excluded.criteria, expected_actions = excluded.expected_actions, "
+                "critical_errors = excluded.critical_errors, competency_codes = excluded.competency_codes, "
+                "equipment_ids = excluded.equipment_ids, enabled = excluded.enabled "
+                "RETURNING id",
                 (module_id,) + values + (time.time(),),
-            )
+            ).fetchone()
             self._conn.commit()
-            return int(cur.lastrowid)
+            return int(row["id"])
 
     def delete_task(self, task_id: int) -> None:
         with self._lock, self._conn:
@@ -663,10 +805,12 @@ class LmsContentStore:
     # ------------------------------------------------------------------
 
     def upsert_scenario(self, module_id: int, w: ScenarioWrite) -> int:
+        # Atomic INSERT ... ON CONFLICT(module_id) DO UPDATE ... RETURNING id;
+        # see upsert_test for rationale. `module_id` is UNIQUE on
+        # lms_scenarios in both _SCHEMA and _SCHEMA_POSTGRES. `status` is
+        # intentionally left out of the SET clause (as in the old UPDATE
+        # branch) so an existing scenario's status survives the upsert.
         with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT id FROM lms_scenarios WHERE module_id = ?", (module_id,)
-            ).fetchone()
             field_errors = (
                 [f.model_dump() for f in w.field_errors]
                 if w.multi_operator else []
@@ -682,28 +826,27 @@ class LmsContentStore:
                 _json(w.final_state), _json(w.competency_codes), _json(w.equipment_ids),
                 w.duration_min, 1 if w.is_exam else 0, 1 if w.multi_operator else 0,
             )
-            if row:
-                self._conn.execute(
-                    "UPDATE lms_scenarios SET title = ?, description = ?, goal = ?, "
-                    "initial_state = ?, events = ?, expected_actions = ?, success_criteria = ?, "
-                    "critical_errors = ?, target_state = ?, field_errors = ?, final_state = ?, "
-                    "competency_codes = ?, equipment_ids = ?, duration_min = ?, is_exam = ?, "
-                    "multi_operator = ? "
-                    "WHERE id = ?",
-                    values + (int(row["id"]),),
-                )
-                self._conn.commit()
-                return int(row["id"])
-            cur = self._conn.execute(
+            row = self._conn.execute(
                 "INSERT INTO lms_scenarios (module_id, title, description, goal, initial_state, "
                 "events, expected_actions, success_criteria, critical_errors, target_state, "
                 "field_errors, final_state, competency_codes, equipment_ids, duration_min, "
                 "is_exam, multi_operator, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(module_id) DO UPDATE SET "
+                "title = excluded.title, description = excluded.description, goal = excluded.goal, "
+                "initial_state = excluded.initial_state, events = excluded.events, "
+                "expected_actions = excluded.expected_actions, "
+                "success_criteria = excluded.success_criteria, "
+                "critical_errors = excluded.critical_errors, target_state = excluded.target_state, "
+                "field_errors = excluded.field_errors, final_state = excluded.final_state, "
+                "competency_codes = excluded.competency_codes, equipment_ids = excluded.equipment_ids, "
+                "duration_min = excluded.duration_min, is_exam = excluded.is_exam, "
+                "multi_operator = excluded.multi_operator "
+                "RETURNING id",
                 (module_id,) + values + (time.time(),),
-            )
+            ).fetchone()
             self._conn.commit()
-            return int(cur.lastrowid)
+            return int(row["id"])
 
     def delete_scenario(self, scenario_id: int) -> None:
         with self._lock, self._conn:
@@ -766,7 +909,7 @@ class LmsContentStore:
 
     def create_assessment(self, a: Assessment) -> int:
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_assessments (user_id, module_id, kind, test_id, task_id, "
                 "scenario_id, score, max_score, passed, criteria_scores, errors_count, "
                 "critical_errors_count, duration_s, answers, feedback_good, feedback_bad, "
@@ -779,7 +922,7 @@ class LmsContentStore:
                  a.started_at, a.finished_at, time.time()),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def get_assessment(self, assessment_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -839,7 +982,7 @@ class LmsContentStore:
 
     def add_action_log(self, entry: Dict[str, Any]) -> int:
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_action_log (timestamp, user_id, username, object_id, object_name, "
                 "action, old_state, new_state, source, session_id, module_id) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -851,7 +994,7 @@ class LmsContentStore:
                  entry.get("module_id")),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def add_action_logs(self, entries: List[Dict[str, Any]]) -> int:
         """Insert a complete session log in one transaction."""
@@ -866,11 +1009,16 @@ class LmsContentStore:
             entry.get("module_id"),
         ) for entry in entries]
         with self._lock, self._conn:
-            self._conn.executemany(
-                "INSERT INTO lms_action_log (timestamp, user_id, username, object_id, object_name, "
-                "action, old_state, new_state, source, session_id, module_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows,
-            )
+            # db.Connection has no `executemany` (neither sqlite3 nor psycopg
+            # need it wrapped for this shim), so insert row-by-row inside a
+            # single transaction instead.
+            for params in rows:
+                self._conn.execute(
+                    "INSERT INTO lms_action_log (timestamp, user_id, username, object_id, object_name, "
+                    "action, old_state, new_state, source, session_id, module_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", params,
+                )
+            self._conn.commit()
         return len(rows)
 
     def list_action_log(self, username: Optional[str] = None,
@@ -908,7 +1056,7 @@ class LmsContentStore:
 
     def add_scada_log(self, entry: Dict[str, Any]) -> int:
         with self._lock, self._conn:
-            cur = self._conn.execute(
+            new_id = self._conn.insert_returning_id(
                 "INSERT INTO lms_scada_log (timestamp, user_id, username, event_type, "
                 "object_id, object_name, duration_s, session_id, module_id) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -918,7 +1066,7 @@ class LmsContentStore:
                  entry.get("duration_s"), entry.get("session_id"), entry.get("module_id")),
             )
             self._conn.commit()
-            return int(cur.lastrowid)
+            return new_id
 
     def list_scada_log(self, username: Optional[str] = None,
                        object_id: Optional[str] = None,

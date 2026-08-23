@@ -1,0 +1,54 @@
+# docker-compose.ci.yml
+#
+# Deployment overlay for the CI/CD deploy runner. Used together with the
+# base file:
+#   docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d
+#
+# WHY THIS FILE EXISTS (kept intentionally tiny -- two overrides only):
+#
+# 1. `build:` -> `image:` for the three services this repo builds
+#    (backend, frontend-build, frontend-nginx). The base docker-compose.yml
+#    is optimized for local development, where `docker compose build` on
+#    your own machine is exactly what you want. On the deploy runner it is
+#    the opposite: the whole point of the pipeline is that an image is
+#    built ONCE in CI, scanned (Trivy + Docker Scout), and ONLY THEN pushed
+#    to the GitLab Container Registry -- the deploy step must run that exact
+#    scanned artifact, never rebuild from source on the runner (see
+#    docs/gitlab-ci-setup.md and CI constraint #8). Compose does not let a
+#    service have both `build:` and a *different* `image:` be selected
+#    conditionally via a flag, so the override lives in this second file
+#    instead of a variable inside docker-compose.yml.
+#
+# 2. `frontend-nginx.ports` -> bind 0.0.0.0 instead of 127.0.0.1. The base
+#    file deliberately binds the published port to loopback only (see the
+#    comment on that service in docker-compose.yml) because the documented
+#    local-dev use case is "open http://localhost:8080 on the same laptop
+#    running Docker Desktop". A shared CI/CD deployment target is a
+#    different machine that a developer reaches over the network to test
+#    the pushed build -- loopback-only there would make the app
+#    unreachable to anyone except someone shelled into the runner itself.
+#
+# Everything else (networks, secrets, healthchecks, cap_drop, read_only,
+# seccomp, resource limits, non-root users, ...) is inherited unchanged from
+# docker-compose.yml -- this file does not re-implement or duplicate any of
+# that hardening.
+
+services:
+  backend:
+    image: ${BACKEND_IMAGE}
+    build: !reset null
+
+  frontend-build:
+    image: ${FRONTEND_BUILD_IMAGE}
+    build: !reset null
+
+  frontend-nginx:
+    image: ${FRONTEND_NGINX_IMAGE}
+    build: !reset null
+    # `!override` (not the default list-merge behaviour) -- without it,
+    # Compose APPENDS this to the base file's `ports:` list instead of
+    # replacing it, leaving BOTH the loopback-only base binding and this
+    # 0.0.0.0 one active at once. Confirmed by testing `docker compose
+    # config` on the merged output before fixing this.
+    ports: !override
+      - "8080:8080"

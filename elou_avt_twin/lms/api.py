@@ -43,7 +43,6 @@ from .models import (
     AnalyticsView,
     CompetencyView,
     CourseCreate,
-    CourseStatus,
     CourseUpdate,
     CourseView,
     DashboardView,
@@ -54,8 +53,6 @@ from .models import (
     GroupView,
     HistoryRow,
     ModuleCreate,
-    ModuleStatus,
-    ModuleView,
     MonitorOperatorView,
     PracticeTask,
     ProfileView,
@@ -63,7 +60,6 @@ from .models import (
     StudyGroup,
     TaskCreate,
     TaskUpdate,
-    UserProgress,
 )
 from .content_store import LmsContentStore
 from .seeds import seed

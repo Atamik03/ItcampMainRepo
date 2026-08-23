@@ -1,0 +1,53 @@
+# Root .dockerignore -- this is the one Docker ACTUALLY reads.
+#
+# All three buildable services (backend, frontend-build, frontend-nginx) use
+# `build.context: .` in docker-compose.yml (the repo root), because their
+# Dockerfiles need to COPY from both elou_avt_twin/ and elou_avt_web/, and
+# frontend-nginx's Dockerfile COPYs docker/frontend-nginx/nginx.conf. Docker
+# only auto-reads a .dockerignore from the ROOT of the build context, so the
+# per-service docker/*/.dockerignore files are NOT automatically applied --
+# they're kept only as documentation / for use with `--ignorefile` if you
+# ever build one Dockerfile directly outside compose. THIS file is what
+# actually shrinks the build context and keeps secrets/credentials/DB data
+# out of it.
+
+# ---- Version control ----
+.git/
+.gitignore
+
+# ---- Secrets & local env (never let these reach a build context) ----
+.env
+.env.*
+!.env.example
+secrets/
+*.auth_secret
+.auth_secret
+
+# ---- Runtime data (never needed to build an image) ----
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# ---- Python (elou_avt_twin) ----
+elou_avt_twin/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+elou_avt_twin/.pytest_cache/
+elou_avt_twin/.coverage
+elou_avt_twin/htmlcov/
+elou_avt_twin/tests/
+
+# ---- Frontend (elou_avt_web) ----
+elou_avt_web/node_modules/
+elou_avt_web/dist/
+**/*.tsbuildinfo
+
+# ---- Docs / misc (not needed inside any image) ----
+*.md
+!README.md
+.vscode/
+.idea/
+*.log
+.DS_Store

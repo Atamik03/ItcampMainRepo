@@ -66,9 +66,16 @@ def test_command_hand_valve_auto_422():
 
 
 def test_training_session_lifecycle():
-    s = start_training_session(StartSessionRequest(scenario_id="LMS-1", operator_id="op1"))
+    # "BASELINE" resolves via _resolve_scenario()'s unconditional, DB-free
+    # branch (_baseline_scenario()); an "LMS-{id}" id would instead require
+    # a matching row to already exist in LmsContentStore's scenario table --
+    # ambient state this test (and this whole module, which calls route
+    # functions directly with no fixtures/isolation) doesn't set up. Using
+    # BASELINE keeps the test deterministic on a fresh checkout while still
+    # exercising the real session start/get lifecycle this test is for.
+    s = start_training_session(StartSessionRequest(scenario_id="BASELINE", operator_id="op1"))
     assert s["status"] == "RUNNING"
-    assert s["scenario_id"] == "LMS-1"
+    assert s["scenario_id"] == "BASELINE"
     assert s["operator_id"] == "op1"
     assert s["session_id"].startswith("TR-")
     got = get_training_session()

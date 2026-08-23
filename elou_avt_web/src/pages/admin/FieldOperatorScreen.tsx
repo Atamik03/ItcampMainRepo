@@ -65,7 +65,13 @@ export default function FieldOperatorScreen() {
   const syncTheme = useCallback(() => {
     const frame = frameRef.current;
     if (frame && frame.contentWindow) {
-      frame.contentWindow.postMessage({ type: 'elou-theme', theme }, '*');
+      // Target origin can't be a concrete origin string here: the iframe
+      // below is `sandbox="allow-scripts"` WITHOUT `allow-same-origin`,
+      // which forces its content into an opaque ("null") origin by spec --
+      // postMessage would silently fail to deliver against any real origin
+      // string, since it would never match. The message itself carries no
+      // sensitive data (UI theme only).
+      frame.contentWindow.postMessage({ type: 'elou-theme', theme }, '*'); // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
     }
   }, [theme]);
 
@@ -76,6 +82,8 @@ export default function FieldOperatorScreen() {
   const syncErrors = useCallback(() => {
     const frame = frameRef.current;
     if (frame && frame.contentWindow) {
+      // Same opaque-sandboxed-origin constraint as syncTheme() above.
+      // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
       frame.contentWindow.postMessage(
         { type: 'elou-field-errors', errors: ctx.errors, session_id: ctx.session_id },
         '*',
@@ -116,7 +124,8 @@ export default function FieldOperatorScreen() {
           });
           const frame = frameRef.current;
           if (frame && frame.contentWindow) {
-            frame.contentWindow.postMessage({ type: 'elou-field-sent', object_id: tag }, '*');
+            // Same opaque-sandboxed-origin constraint as syncTheme() above.
+            frame.contentWindow.postMessage({ type: 'elou-field-sent', object_id: tag }, '*'); // nosemgrep: javascript.browser.security.wildcard-postmessage-configuration.wildcard-postmessage-configuration
           }
           api.logScadaEvent({
             event_type: 'inspector_open',

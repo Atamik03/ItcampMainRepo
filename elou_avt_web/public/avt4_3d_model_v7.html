@@ -1676,9 +1676,21 @@ const v=new THREE.Vector3();
 let tPrev=performance.now();
 let lastRenderedAt=0, readySent=false;
 let fieldErrors = [], fieldSent = {}, fieldSession = null, markers = [];
+let frameErrorReported=false;
 function frame(tNow){
   requestAnimationFrame(frame);
   if(document.hidden||tNow-lastRenderedAt<33)return;
+  // `requestAnimationFrame` re-schedules itself above BEFORE any of the
+  // per-frame work runs, so if anything below throws, the loop keeps
+  // ticking forever (each tick is its own top-level callback, not caught by
+  // the outer synchronous try/catch around this script's setup code) -- but
+  // without this inner try/catch, `readySent` would never flip to true and
+  // no 'elou-model-error' would ever be posted either: the host page
+  // (FieldOperatorScreen.tsx) would show an infinite "Загрузка 3D-модели"
+  // spinner forever with no error anywhere, network or console. Catching
+  // here turns that silent hang into a visible, actionable error (and logs
+  // the real exception, since this sandbox has no browser to inspect it in).
+  try{
   lastRenderedAt=tNow;
   const dt=Math.min(0.05,(tNow-tPrev)/1000); tPrev=tNow;
   stepWalker(dt);
@@ -1715,6 +1727,19 @@ function frame(tNow){
       objects:reg.length,
       selectable:picks.length,
     },'*');}catch(_e){}
+  }
+  } catch(frameError) {
+    console.error('3D model frame() failed', frameError);
+    if(!frameErrorReported){
+      frameErrorReported=true;
+      const loading=document.getElementById('loading'); if(loading)loading.style.display='none';
+      const err=document.getElementById('err');
+      if(err){
+        err.textContent='Не удалось отрисовать 3D-модель: '+(frameError && frameError.message ? frameError.message : String(frameError));
+        err.style.display='grid';
+      }
+      try{window.parent.postMessage({type:'elou-model-error', message:frameError && frameError.message ? frameError.message : String(frameError)},'*');}catch(_e){}
+    }
   }}
 requestAnimationFrame(frame);
 addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();
