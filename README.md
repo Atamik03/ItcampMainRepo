@@ -18,9 +18,9 @@
 9. [Физическое расчётное ядро](#физическое-расчётное-ядро)
 10. [Схемы P&ID и дубли ID](#схемы-pid-и-дубли-id)
 11. [Проверка / тесты](#проверка--тесты)
-12. [Диагностика проблем](#диагностика-проблем)
-13. [История изменений](#история-изменений)
-14. [Что дальше: подготовка к CI/CD](#что-дальше-подготовка-к-cicd)
+12. [CI/CD (GitHub Actions)](#cicd-github-actions)
+13. [Диагностика проблем](#диагностика-проблем)
+14. [История изменений](#история-изменений)
 
 ---
 
@@ -559,9 +559,33 @@ cd ../elou_avt_web
 npm ci
 npm run build
 node tools/benchmark_3d_model.mjs public/avt4_3d_model_v7.html
+npm run lint
 ```
 
-ESLint в `elou_avt_web/` не настроен (нет конфига/скрипта `lint`) — известный пробел инструментария, пока не устранён.
+## CI/CD (GitHub Actions)
+
+Пайплайн описан в [`.github/workflows/ci.yml`](.github/workflows/ci.yml) и
+запускается на каждый push и pull request:
+
+```
+validate  ->  lint  ->  security  ->  test  ->  build
+```
+
+- **validate** — проверка, что `docker-compose.yml` + `docker-compose.ci.yml` корректно мёржатся (`docker compose config`).
+- **lint** — TypeScript typecheck (`tsc -b --noEmit`) и ESLint для `elou_avt_web/`.
+- **security** (параллельно с `test`) — Bandit и Trivy filesystem-скан бэкенда, Semgrep (Python/TS/React + security-audit + secrets), Hadolint для всех трёх Dockerfile.
+- **test** — `pytest` бэкенда (SQLite/no-op Redis, без внешних сервисов).
+- **build** — сборка трёх образов (`backend`, `frontend-build`, `frontend-nginx`) матрицей, Trivy image-скан, и только при успешном скане — push в GitHub Container Registry (`ghcr.io/<owner>/<repo>/<service>:<sha>`). Аутентификация — встроенный `GITHUB_TOKEN`, дополнительные секреты не нужны.
+
+**Что не реализовано:** стадии `deploy`/`verify`/`rollback` (раскатка `docker
+compose` на реальный сервер и последующие smoke-тесты) требуют self-hosted
+GitHub Actions runner с доступом к целевому хосту — сейчас такого раннера
+нет, поэтому эти стадии не подключены. Причины и структура для будущего
+переноса задокументированы прямо в шапке `.github/workflows/ci.yml`.
+
+Docker Scout (использовался в прежнем GitLab-пайплайне как второй скан
+образов, помимо Trivy) убран — требовал отдельного логина в Docker Hub,
+не связанного с публикацией образов в ghcr.io.
 
 ## Диагностика проблем
 
@@ -626,15 +650,3 @@ docker` — членство в группе применяется не мгн�
 - ESLint в `elou_avt_web/` — подтверждено отсутствие конфигурации (не
   добавлялось в рамках аудита, вне объёма «не переписывай ради стиля»).
 
-## Что дальше: подготовка к CI/CD
-
-Стек локально проверен и воспроизводим, но GitLab CI/CD pipeline **не
-реализован** — только оценена готовность. Понадобится на следующем этапе:
-
-- `.gitlab-ci.yml` с этапами `lint → security-scan → build → image → deploy → healthcheck`.
-- CI-раннер должен уметь генерировать `./secrets/*` так же, как `start.sh` — но с секретами из GitLab CI/CD Variables (Protected + Masked), а не сгенерированными на лету, чтобы окружения были воспроизводимы между запусками pipeline.
-- Bandit/Semgrep конфигурации ещё не добавлены (нет `.bandit`/`.semgrep.yml`) — на первом прогоне в CI появится «шумный» baseline находок, который стоит разобрать до включения жёсткого фейла.
-- Hadolint можно запускать уже сейчас локально (`docker run --rm -i hadolint/hadolint < docker/backend/Dockerfile`) — стоит прогнать перед первым CI-запуском.
-- ESLint для frontend нужно сначала добавить в проект (см. «История изменений») — иначе шаг pipeline будет нечего запускать.
-- Docker Scout — нужен либо `docker scout` CLI, либо `docker/scout-action` в GitLab CI — не протестировано.
-- Для `Deploy with docker-compose` на GitLab Runner: раннер должен иметь доступ к Docker (`docker:dind` или shared daemon) и `docker compose` v2 — стоит закрепить конкретную версию раннера заранее.

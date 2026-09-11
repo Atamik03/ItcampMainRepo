@@ -1,0 +1,251 @@
+# .github/workflows/ci.yml
+#
+# ЭЛОУ-АВТ Digital Twin -- CI pipeline.
+#
+# Stages: validate -> lint -> security -> test -> build.
+# NOT implemented: deploy / verify / rollback -- rolling out via `docker
+# compose` on the actual deployment host requires a self-hosted GitHub
+# Actions runner registered on that host. There is currently no such
+# runner, so those stages are intentionally left out rather than faked
+# with GitHub-hosted runners that can't reach the real server. See
+# docker-compose.ci.yml for the deploy-time compose overlay this would
+# use once a self-hosted runner exists.
+#
+# Registry: GitHub Container Registry (ghcr.io), auth via the built-in
+# GITHUB_TOKEN -- no extra secrets needed for push.
+#
+# No Docker Scout: it requires a separate Docker Hub login unrelated to
+# the registry used for push. Trivy image scanning is the sole image-scan
+# gate.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_BASE: ghcr.io/${{ github.repository }}
+  TRIVY_SEVERITY: "HIGH,CRITICAL"
+  BANDIT_SEVERITY_LEVEL: "medium"
+  BANDIT_CONFIDENCE_LEVEL: "medium"
+  TRIVY_VERSION: "0.56.2"
+  BANDIT_VERSION: "1.9.4"
+  SEMGREP_VERSION: "1.99.0"
+  HADOLINT_VERSION: "2.12.0"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # ---------------------------------------------------------------------
+  # validate
+  # ---------------------------------------------------------------------
+  validate:
+    name: validate / compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yml + CI overlay merge
+        run: |
+          POSTGRES_USER=x POSTGRES_DB=x ELOU_ENV=x ELOU_AUTH_MODE=x ELOU_CORS_ORIGINS=x \
+          BACKEND_IMAGE=x FRONTEND_BUILD_IMAGE=x FRONTEND_NGINX_IMAGE=x \
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml config -q
+
+  # ---------------------------------------------------------------------
+  # lint
+  # ---------------------------------------------------------------------
+  frontend-typecheck:
+    name: lint / frontend typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: elou_avt_web/package-lock.json
+      - working-directory: elou_avt_web
+        run: npm ci --prefer-offline
+      - working-directory: elou_avt_web
+        run: npx tsc -b --noEmit
+
+  frontend-eslint:
+    name: lint / eslint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: elou_avt_web/package-lock.json
+      - working-directory: elou_avt_web
+        run: npm ci --prefer-offline
+      - working-directory: elou_avt_web
+        run: npm run lint
+
+  # ---------------------------------------------------------------------
+  # security (parallel with each other AND with test)
+  # ---------------------------------------------------------------------
+  bandit:
+    name: security / bandit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --no-cache-dir "bandit==$BANDIT_VERSION"
+      - run: bandit -r elou_avt_twin -x elou_avt_twin/.venv,elou_avt_twin/tests -f json -o bandit-report.json --exit-zero
+      - run: bandit -r elou_avt_twin -x elou_avt_twin/.venv,elou_avt_twin/tests -f screen
+      - run: bandit -r elou_avt_twin -x elou_avt_twin/.venv,elou_avt_twin/tests --severity-level "$BANDIT_SEVERITY_LEVEL" --confidence-level "$BANDIT_CONFIDENCE_LEVEL"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+          retention-days: 30
+
+  semgrep:
+    name: security / semgrep
+    runs-on: ubuntu-latest
+    container:
+      image: returntocorp/semgrep:1.99.0
+    env:
+      SEMGREP_METRICS: "off"
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          semgrep scan \
+            --config=p/python --config=p/typescript --config=p/react \
+            --config=p/security-audit --config=p/secrets \
+            --exclude="**/.venv/**" --exclude="**/node_modules/**" \
+            --exclude="**/dist/**" --exclude="**/visual/**" \
+            --metrics=off \
+            --sarif --output=semgrep.sarif \
+            --error \
+            .
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          retention-days: 30
+
+  hadolint:
+    name: security / hadolint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint Dockerfiles
+        run: |
+          status=0
+          for f in docker/backend/Dockerfile docker/frontend-build/Dockerfile docker/frontend-nginx/Dockerfile; do
+            echo "== $f =="
+            docker run --rm -i -v "$PWD/.hadolint.yaml:/.hadolint.yaml" \
+              "hadolint/hadolint:${HADOLINT_VERSION}-alpine" hadolint --config /.hadolint.yaml - < "$f" || status=1
+          done
+          exit $status
+
+  trivy-fs:
+    name: security / trivy filesystem scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          severity: ${{ env.TRIVY_SEVERITY }}
+          skip-dirs: elou_avt_twin/.venv,elou_avt_web/node_modules,visual,data,secrets
+          trivyignores: .trivyignore
+          exit-code: "1"
+        env:
+          TRIVY_VERSION: ${{ env.TRIVY_VERSION }}
+
+  # ---------------------------------------------------------------------
+  # test (parallel with security)
+  # ---------------------------------------------------------------------
+  backend-tests:
+    name: test / backend pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: elou_avt_twin/requirements.txt
+      - working-directory: elou_avt_twin
+        run: pip install --no-cache-dir -r requirements.txt
+      - working-directory: elou_avt_twin
+        # No DATABASE_URL / REDIS_URL: falls back to local SQLite / a
+        # no-op Redis client, same as local non-Docker dev (see
+        # elou_avt_twin/persistence/db.py and realtime/redis_bus.py).
+        run: python -m pytest -q
+
+  # ---------------------------------------------------------------------
+  # build (needs everything above green; 3 independent images in parallel)
+  # ---------------------------------------------------------------------
+  build:
+    name: build / ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs:
+      - validate
+      - frontend-typecheck
+      - frontend-eslint
+      - bandit
+      - semgrep
+      - hadolint
+      - trivy-fs
+      - backend-tests
+    strategy:
+      matrix:
+        include:
+          - service: backend
+            dockerfile: docker/backend/Dockerfile
+          - service: frontend-build
+            dockerfile: docker/frontend-build/Dockerfile
+          - service: frontend-nginx
+            dockerfile: docker/frontend-nginx/Dockerfile
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tag
+        id: vars
+        run: echo "image=${IMAGE_BASE}/${{ matrix.service }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build image
+        run: docker build -t "${{ steps.vars.outputs.image }}" -f "${{ matrix.dockerfile }}" .
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.vars.outputs.image }}
+          scan-type: image
+          severity: ${{ env.TRIVY_SEVERITY }}
+          trivyignores: .trivyignore
+          exit-code: "1"
+
+      # Vulnerable images are never pushed: push only runs if the scan
+      # step above already exited 0, same ordering guarantee as the
+      # GitLab .build_scan_push job.
+      - name: Push image
+        run: docker push "${{ steps.vars.outputs.image }}"

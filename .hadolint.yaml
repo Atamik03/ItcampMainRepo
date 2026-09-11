@@ -1,8 +1,7 @@
 # .hadolint.yaml
 #
-# Documented, reviewed exceptions only -- never auto-populated. See
-# docs/gitlab-ci-setup.md "Security policy" for how this file is used by
-# the pipeline's `hadolint` job.
+# Documented, reviewed exceptions only -- never auto-populated. Used by
+# the CI pipeline's `hadolint` job (see .github/workflows/ci.yml).
 ignored:
   # DL3008 (docker/backend/Dockerfile): "Pin versions in apt get install"
   # for `build-essential`/`gcc`. Deliberately NOT pinned:

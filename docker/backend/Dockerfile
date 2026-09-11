@@ -44,7 +44,7 @@ FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa70
 # Debian. This pulls whatever patched package versions Debian's security
 # repo already has for the pinned base digest above, closing that gap
 # without waiting on the next upstream rebuild. Confirmed via Trivy image
-# scan (see docs/gitlab-ci-setup.md) that this resolves every HIGH/CRITICAL
+# scan (see .github/workflows/ci.yml) that this resolves every HIGH/CRITICAL
 # finding that had `status: fixed` at the time this Dockerfile was written;
 # the remaining findings (gzip, libacl1, ncurses, openssl, perl-base) have
 # no fix published anywhere yet and are tracked in .trivyignore instead.

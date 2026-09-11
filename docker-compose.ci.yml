@@ -11,10 +11,9 @@
 #    is optimized for local development, where `docker compose build` on
 #    your own machine is exactly what you want. On the deploy runner it is
 #    the opposite: the whole point of the pipeline is that an image is
-#    built ONCE in CI, scanned (Trivy + Docker Scout), and ONLY THEN pushed
-#    to the GitLab Container Registry -- the deploy step must run that exact
-#    scanned artifact, never rebuild from source on the runner (see
-#    docs/gitlab-ci-setup.md and CI constraint #8). Compose does not let a
+#    built ONCE in CI, scanned (Trivy), and ONLY THEN pushed to the
+#    container registry (ghcr.io) -- the deploy step must run that exact
+#    scanned artifact, never rebuild from source on the runner. Compose does not let a
 #    service have both `build:` and a *different* `image:` be selected
 #    conditionally via a flag, so the override lives in this second file
 #    instead of a variable inside docker-compose.yml.

@@ -19,7 +19,7 @@ FROM nginxinc/nginx-unprivileged:1.27-alpine@sha256:65e3e85dbaed8ba248841d9d58a8
 # instant a CVE fix lands in Alpine. `apk upgrade` pulls whatever patched
 # package versions Alpine's repo already has for the pinned base digest
 # above, closing that gap without waiting on nginxinc's next rebuild.
-# Confirmed via Trivy image scan (see docs/gitlab-ci-setup.md) that this
+# Confirmed via Trivy image scan (see .github/workflows/ci.yml) that this
 # alone resolves every HIGH/CRITICAL finding that had `status: fixed` in
 # Alpine's repo at the time this Dockerfile was written; re-run the
 # pipeline's Trivy image-scan job to verify it still does on any later

@@ -3,8 +3,8 @@
 # Documented, individually-reviewed exceptions ONLY -- every entry below was
 # verified against a real `trivy image` scan of the actual built image,
 # confirming no fix is currently available anywhere (Status: "affected" or
-# "fix_deferred", no FixedVersion). See docs/gitlab-ci-setup.md "Security
-# policy" for how this file is used by the pipeline's Trivy image-scan job.
+# "fix_deferred", no FixedVersion). Used by the CI pipeline's Trivy
+# filesystem and image-scan jobs (see .github/workflows/ci.yml).
 #
 # NOT an auto-populated allowlist: each line below is the result of running
 # `trivy image --severity HIGH,CRITICAL <image>` against a locally built

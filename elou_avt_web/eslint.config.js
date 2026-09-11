@@ -1,6 +1,6 @@
 // eslint.config.js
 //
-// Added for the GitLab CI pipeline's mandatory ESLint check -- this project
+// Added for the CI pipeline's mandatory ESLint check -- this project
 // had NO ESLint configuration at all before (confirmed: no .eslintrc*, no
 // eslint.config.*, no `eslint` devDependency, no `lint` script). This is
 // the minimal, standard flat-config setup for this exact stack (React 18 +
