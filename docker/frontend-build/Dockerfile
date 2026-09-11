@@ -19,8 +19,9 @@
 # npm@latest (12.x) requires Node >=22 and fails outright (EBADENGINE)
 # against Node 20 -- confirmed both ways before switching the base
 # image. Node 22 is still an active LTS line (maintenance until
-# 2027-04-30) and its own bundled npm plus `npm install -g npm@latest`
-# both resolve to CVE-fixed pacote/tar versions.
+# 2027-04-30) and its own bundled npm plus an `npm install -g npm@...`
+# upgrade both resolve to a CVE-fixed pacote version (tar/js-yaml still
+# need the explicit pin below).
 FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS build
 
 WORKDIR /app
@@ -32,31 +33,33 @@ WORKDIR /app
 # tsconfig.tsbuildinfo written during `tsc -b`), and `npm run build`
 # fails with EACCES.
 #
-# npm install -g npm@latest: belt-and-suspenders on top of the Node 22
+# npm install -g npm@12.0.2: belt-and-suspenders on top of the Node 22
 # base image bump above -- makes sure the bundled npm CLI itself stays
 # current rather than whatever shipped with this particular Alpine
-# rebuild.
+# rebuild. Pinned to an exact version, not `@latest` (hadolint DL3016:
+# pin versions in npm install).
 #
-# The `npm install --prefix "$(npm root -g)/npm" tar js-yaml --no-save`
-# that follows fixes something npm@latest alone does not: npm vendors
-# tar/js-yaml as PRIVATE dependencies inside its own node_modules (not
-# the global node_modules any `npm install -g <pkg>` would touch), and
-# npm@latest (12.0.2) itself still pins tar to ^7.5.19 and js-yaml
-# transitively -- both resolve to the OLDEST version satisfying that
-# range, which is still inside the vulnerable range for CVE-2026-73566
-# (fix: 7.5.21) and CVE-2026-84375 (fix: 4.3.2), confirmed via this
-# pipeline's own Trivy image scan even after the node:22-alpine +
-# npm@latest change above. Upgrading the copies inside npm's own
-# node_modules directly is the only way to reach the fixed versions
-# without npm itself cutting a new release. `--prefix` instead of `cd`
-# (hadolint DL3003: use WORKDIR, not cd, to change directory -- `cd` in
-# a RUN here would only need to apply to one command in the chain, so
-# WORKDIR itself is the wrong tool; --prefix avoids `cd` entirely).
+# The `npm install --prefix "$(npm root -g)/npm" tar@7.5.21
+# js-yaml@4.3.2 --no-save` that follows fixes something npm@12.0.2
+# alone does not: npm vendors tar/js-yaml as PRIVATE dependencies
+# inside its own node_modules (not the global node_modules any `npm
+# install -g <pkg>` would touch), and npm@12.0.2 itself still pins tar
+# to ^7.5.19 and js-yaml transitively -- both resolve to the OLDEST
+# version satisfying that range, which is still inside the vulnerable
+# range for CVE-2026-73566 (fix: 7.5.21) and CVE-2026-84375 (fix:
+# 4.3.2), confirmed via this pipeline's own Trivy image scan even after
+# the node:22-alpine + npm upgrade above. Upgrading the copies inside
+# npm's own node_modules directly, pinned to the exact fixed versions
+# (hadolint DL3016), is the only way to reach them without npm itself
+# cutting a new release. `--prefix` instead of `cd` (hadolint DL3003:
+# use WORKDIR, not cd, to change directory -- `cd` in a RUN here would
+# only need to apply to one command in the chain, so WORKDIR itself is
+# the wrong tool; --prefix avoids `cd` entirely).
 # Combined into one RUN with the chown above (hadolint DL3059: no
 # consecutive RUNs).
 RUN chown node:node /app \
-    && npm install -g npm@latest \
-    && npm install --prefix "$(npm root -g)/npm" tar@^7.5.21 js-yaml@^4.3.2 --no-save
+    && npm install -g npm@12.0.2 \
+    && npm install --prefix "$(npm root -g)/npm" tar@7.5.21 js-yaml@4.3.2 --no-save
 
 # Copy manifest files first for better Docker layer caching: `npm ci` only
 # re-runs when package.json/package-lock.json actually change.
