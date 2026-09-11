@@ -12,23 +12,24 @@ FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb836
 
 WORKDIR /app
 
-# WORKDIR creates /app as root (USER node hasn't taken effect yet), and
-# `COPY --chown` below only chowns the files it copies, not the /app
-# directory entry itself -- without this, the `node` user can read the
-# copied files but can't create NEW files in /app (e.g. tsconfig.tsbuildinfo
-# written during `tsc -b`), and `npm run build` fails with EACCES.
-RUN chown node:node /app
-
-# node:20-alpine ships its own bundled npm CLI with its own vendored
-# dependencies (js-yaml, pacote, tar, ...) -- those drift out of date
-# between Alpine base-image rebuilds the same way OS packages do (see
-# docker/backend/Dockerfile's `apt-get upgrade` and
-# docker/frontend-nginx/Dockerfile's `apk upgrade` for the same pattern).
-# Confirmed via Trivy image scan that the pinned digest's bundled npm
-# carries HIGH findings (CVE-2026-84375 js-yaml, CVE-2026-9496 pacote,
-# CVE-2026-73566 tar) with no way to reach them except replacing npm
-# itself -- they are not project dependencies.
-RUN npm install -g npm@latest
+# chown: WORKDIR creates /app as root (USER node hasn't taken effect
+# yet), and `COPY --chown` below only chowns the files it copies, not
+# the /app directory entry itself -- without this, the `node` user can
+# read the copied files but can't create NEW files in /app (e.g.
+# tsconfig.tsbuildinfo written during `tsc -b`), and `npm run build`
+# fails with EACCES.
+#
+# npm install -g npm@latest: node:20-alpine ships its own bundled npm
+# CLI with its own vendored dependencies (js-yaml, pacote, tar, ...) --
+# those drift out of date between Alpine base-image rebuilds the same
+# way OS packages do (see docker/backend/Dockerfile's `apt-get upgrade`
+# and docker/frontend-nginx/Dockerfile's `apk upgrade` for the same
+# pattern). Confirmed via Trivy image scan that the pinned digest's
+# bundled npm carries HIGH findings (CVE-2026-84375 js-yaml,
+# CVE-2026-9496 pacote, CVE-2026-73566 tar) with no way to reach them
+# except replacing npm itself -- they are not project dependencies.
+# Combined into one RUN with the chown above (hadolint DL3059).
+RUN chown node:node /app && npm install -g npm@latest
 
 # Copy manifest files first for better Docker layer caching: `npm ci` only
 # re-runs when package.json/package-lock.json actually change.
