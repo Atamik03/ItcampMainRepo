@@ -9,3 +9,11 @@ fastapi>=0.115,<1
 uvicorn[standard]>=0.30,<1
 psycopg[binary]>=3.1,<4
 redis>=5.0,<6
+
+# Not direct dependencies of this project -- pinned here to force pip's
+# resolver to pick versions with published CVE fixes (GHSA-6v7p-g79w-8964,
+# CVE-2025-47273) instead of whatever older transitive version another
+# package would otherwise pull in. See .github/workflows/ci.yml's Trivy
+# image-scan job, which caught both in the built backend image.
+msgpack>=1.2.1
+setuptools>=78.1.1

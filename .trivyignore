@@ -45,6 +45,29 @@ CVE-2026-42497
 CVE-2026-48962
 CVE-2026-57432
 CVE-2026-9538
+# util-linux family (bsdutils, libblkid1, liblastlog2-2, libmount1,
+# libsmartcols1, libuuid1, login, mount, util-linux itself): 4 distinct
+# CVEs against the same util-linux source package, all "affected" (no
+# fix published anywhere at time of review). This image's application
+# code never calls mount/nsenter/login -- these are inherited OS-level
+# tooling from python:3.12-slim's Debian base, not invoked by anything
+# in elou_avt_twin.
+CVE-2026-76642
+CVE-2026-78408
+CVE-2026-78409
+CVE-2026-78410
+# libsqlite3-0: 2 distinct CVEs (FTS5 full-text-search and buffer
+# overflow paths), no fix published. This application uses PostgreSQL
+# in the Docker stack (see persistence/db.py) -- SQLite is only used in
+# the non-Docker local-dev path, and even there, application code never
+# feeds untrusted input into FTS5 queries or the affected code paths.
+CVE-2026-11822
+CVE-2026-11824
+# libsystemd0 / libudev1: systemd-homed local-privilege-escalation CVE,
+# no fix published. This container never runs systemd-homed (no systemd
+# init at all -- python:3.12-slim runs a single uvicorn process as PID
+# 1's child), so the vulnerable code path is unreachable.
+CVE-2026-16742
 
 ## ---- docker-js (frontend-build, node:22-alpine) ----
 ## One-shot build container: compiles the frontend and exits, never
