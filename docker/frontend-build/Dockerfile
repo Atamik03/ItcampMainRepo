@@ -49,14 +49,23 @@ WORKDIR /app
 # range for CVE-2026-73566 (fix: 7.5.21) and CVE-2026-84375 (fix:
 # 4.3.2), confirmed via this pipeline's own Trivy image scan even after
 # the node:22-alpine + npm upgrade above. Upgrading the copies inside
-# npm's own node_modules directly, pinned to the exact fixed versions
-# (hadolint DL3016), is the only way to reach them without npm itself
-# cutting a new release. `--prefix` instead of `cd` (hadolint DL3003:
-# use WORKDIR, not cd, to change directory -- `cd` in a RUN here would
-# only need to apply to one command in the chain, so WORKDIR itself is
-# the wrong tool; --prefix avoids `cd` entirely).
+# npm's own node_modules directly, pinned to the exact fixed versions,
+# is the only way to reach them without npm itself cutting a new
+# release. `--prefix` instead of `cd` (hadolint DL3003: use WORKDIR,
+# not cd, to change directory -- `cd` in a RUN here would only need to
+# apply to one command in the chain, so WORKDIR itself is the wrong
+# tool; --prefix avoids `cd` entirely).
 # Combined into one RUN with the chown above (hadolint DL3059: no
 # consecutive RUNs).
+#
+# The ignore=DL3016 below is a confirmed false positive, not a real
+# unpinned version: both packages ARE pinned exactly (tar@7.5.21,
+# js-yaml@4.3.2), but hadolint's DL3016 checker doesn't know `--prefix`
+# takes a value, so it treats the path after it ("$(npm root -g)/npm")
+# as an unpinned package name (confirmed against hadolint's own
+# DL3016.hs source -- `ignoreFlags` there only special-cases
+# `--loglevel`/`--registry`, not `--prefix`).
+# hadolint ignore=DL3016
 RUN chown node:node /app \
     && npm install -g npm@12.0.2 \
     && npm install --prefix "$(npm root -g)/npm" tar@7.5.21 js-yaml@4.3.2 --no-save
