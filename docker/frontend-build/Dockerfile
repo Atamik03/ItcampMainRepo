@@ -19,7 +19,7 @@ WORKDIR /app
 # tsconfig.tsbuildinfo written during `tsc -b`), and `npm run build`
 # fails with EACCES.
 #
-# npm install -g npm@latest: node:20-alpine ships its own bundled npm
+# npm install -g npm@11.6.4: node:20-alpine ships its own bundled npm
 # CLI with its own vendored dependencies (js-yaml, pacote, tar, ...) --
 # those drift out of date between Alpine base-image rebuilds the same
 # way OS packages do (see docker/backend/Dockerfile's `apt-get upgrade`
@@ -28,8 +28,15 @@ WORKDIR /app
 # bundled npm carries HIGH findings (CVE-2026-84375 js-yaml,
 # CVE-2026-9496 pacote, CVE-2026-73566 tar) with no way to reach them
 # except replacing npm itself -- they are not project dependencies.
+# Pinned to 11.6.4 rather than `@latest`: npm 12.x requires Node
+# ^22.22.2 / ^24.15.0 / >=26, which is newer than this image's Node 20
+# and fails the install outright (confirmed: `npm@latest` resolved to
+# 12.0.2 and errored with EBADENGINE against Node v20.20.2). 11.6.4 is
+# the newest release whose own engines field still allows Node 20
+# (^20.17.0 || >=22.9.0) and it already contains the fixes for all
+# three CVEs above.
 # Combined into one RUN with the chown above (hadolint DL3059).
-RUN chown node:node /app && npm install -g npm@latest
+RUN chown node:node /app && npm install -g npm@11.6.4
 
 # Copy manifest files first for better Docker layer caching: `npm ci` only
 # re-runs when package.json/package-lock.json actually change.
