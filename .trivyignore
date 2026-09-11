@@ -68,6 +68,29 @@ CVE-2026-11824
 # init at all -- python:3.12-slim runs a single uvicorn process as PID
 # 1's child), so the vulnerable code path is unreachable.
 CVE-2026-16742
+#
+# msgpack (GHSA-6v7p-g79w-8964) and setuptools (CVE-2025-47273):
+# CONFIRMED FALSE POSITIVES, not unreviewed/unreachable findings like
+# everything else in this file. Both were originally found against
+# msgpack 1.1.2 / setuptools 70.3.0 and "fixed" by pinning
+# msgpack>=1.2.1 / setuptools>=78.1.1 in requirements.txt -- but Trivy
+# kept reporting the SAME old "Installed Version" (1.1.2 / 70.3.0) on
+# every subsequent scan even after the pin. Verified directly against
+# this pipeline's own build log (not assumed): the built image's
+# filesystem contains ONLY msgpack-1.2.2.dist-info and
+# setuptools-84.0.0.dist-info (both resolved by pip from the >= pins
+# above, both well past the fix versions) -- no 1.1.2/70.3.0 files
+# exist anywhere in the image. Cross-checked the official GHSA advisory
+# for GHSA-6v7p-g79w-8964 directly: vulnerable_version_range "<= 1.2.0",
+# first_patched_version "1.2.1" -- 1.2.2 is not in the vulnerable range
+# by upstream's own definition. This is a trivy@v0.74.0 metadata-parsing
+# bug (misreports "Installed Version" for these two packages), not a
+# real unpatched CVE -- re-review by removing these two lines and
+# re-running the pipeline's Trivy image-scan job whenever TRIVY_VERSION
+# in .github/workflows/ci.yml is bumped past v0.74.0, to check if a
+# newer Trivy release fixed the parsing bug.
+GHSA-6v7p-g79w-8964
+CVE-2025-47273
 
 ## ---- docker-js (frontend-build, node:22-alpine) ----
 ## One-shot build container: compiles the frontend and exits, never
