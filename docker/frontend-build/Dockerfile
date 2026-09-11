@@ -19,6 +19,17 @@ WORKDIR /app
 # written during `tsc -b`), and `npm run build` fails with EACCES.
 RUN chown node:node /app
 
+# node:20-alpine ships its own bundled npm CLI with its own vendored
+# dependencies (js-yaml, pacote, tar, ...) -- those drift out of date
+# between Alpine base-image rebuilds the same way OS packages do (see
+# docker/backend/Dockerfile's `apt-get upgrade` and
+# docker/frontend-nginx/Dockerfile's `apk upgrade` for the same pattern).
+# Confirmed via Trivy image scan that the pinned digest's bundled npm
+# carries HIGH findings (CVE-2026-84375 js-yaml, CVE-2026-9496 pacote,
+# CVE-2026-73566 tar) with no way to reach them except replacing npm
+# itself -- they are not project dependencies.
+RUN npm install -g npm@latest
+
 # Copy manifest files first for better Docker layer caching: `npm ci` only
 # re-runs when package.json/package-lock.json actually change.
 COPY --chown=node:node elou_avt_web/package.json elou_avt_web/package-lock.json ./
