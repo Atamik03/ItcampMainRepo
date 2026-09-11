@@ -22,7 +22,7 @@ Set-Location $RepoRoot
 # image:tag -> file(s) containing the literal "image:tag" string to replace
 $Targets = [ordered]@{
     "python:3.12-slim"                         = @("docker\backend\Dockerfile")
-    "node:20-alpine"                           = @("docker\frontend-build\Dockerfile")
+    "node:22-alpine"                           = @("docker\frontend-build\Dockerfile")
     "nginxinc/nginx-unprivileged:1.27-alpine"  = @("docker\frontend-nginx\Dockerfile")
     "postgres:16-alpine"                       = @("docker-compose.yml")
     "redis:7-alpine"                           = @("docker-compose.yml")

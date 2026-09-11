@@ -8,7 +8,20 @@
 # Build context is the REPO ROOT (see docker-compose.yml `frontend-build.build.context: .`).
 
 # Pinned via scripts/pin-digests.*; re-run that script to move to a newer digest.
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
+#
+# node:22-alpine, not node:20: node:20-alpine's bundled npm CLI vendors
+# old js-yaml/pacote/tar with HIGH/CRITICAL CVEs (CVE-2026-84375,
+# CVE-2026-9496, CVE-2026-73566 -- caught by this pipeline's Trivy image
+# scan). Pinning `npm install -g npm@<version>` to something old enough
+# to still support Node 20 doesn't actually clear them: the newest npm
+# release compatible with Node 20 (11.6.4) still resolves pacote/tar
+# ranges that npm audit reports as vulnerable to the same CVEs, and
+# npm@latest (12.x) requires Node >=22 and fails outright (EBADENGINE)
+# against Node 20 -- confirmed both ways before switching the base
+# image. Node 22 is still an active LTS line (maintenance until
+# 2027-04-30) and its own bundled npm plus `npm install -g npm@latest`
+# both resolve to CVE-fixed pacote/tar versions.
+FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS build
 
 WORKDIR /app
 
@@ -19,24 +32,12 @@ WORKDIR /app
 # tsconfig.tsbuildinfo written during `tsc -b`), and `npm run build`
 # fails with EACCES.
 #
-# npm install -g npm@11.6.4: node:20-alpine ships its own bundled npm
-# CLI with its own vendored dependencies (js-yaml, pacote, tar, ...) --
-# those drift out of date between Alpine base-image rebuilds the same
-# way OS packages do (see docker/backend/Dockerfile's `apt-get upgrade`
-# and docker/frontend-nginx/Dockerfile's `apk upgrade` for the same
-# pattern). Confirmed via Trivy image scan that the pinned digest's
-# bundled npm carries HIGH findings (CVE-2026-84375 js-yaml,
-# CVE-2026-9496 pacote, CVE-2026-73566 tar) with no way to reach them
-# except replacing npm itself -- they are not project dependencies.
-# Pinned to 11.6.4 rather than `@latest`: npm 12.x requires Node
-# ^22.22.2 / ^24.15.0 / >=26, which is newer than this image's Node 20
-# and fails the install outright (confirmed: `npm@latest` resolved to
-# 12.0.2 and errored with EBADENGINE against Node v20.20.2). 11.6.4 is
-# the newest release whose own engines field still allows Node 20
-# (^20.17.0 || >=22.9.0) and it already contains the fixes for all
-# three CVEs above.
-# Combined into one RUN with the chown above (hadolint DL3059).
-RUN chown node:node /app && npm install -g npm@11.6.4
+# npm install -g npm@latest: belt-and-suspenders on top of the Node 22
+# base image bump above -- makes sure the bundled npm CLI itself (and
+# the pacote/tar it vendors) stays current rather than whatever shipped
+# with this particular Alpine rebuild. Combined into one RUN with the
+# chown above (hadolint DL3059: no consecutive RUNs).
+RUN chown node:node /app && npm install -g npm@latest
 
 # Copy manifest files first for better Docker layer caching: `npm ci` only
 # re-runs when package.json/package-lock.json actually change.
@@ -45,7 +46,7 @@ RUN npm ci
 
 COPY --chown=node:node elou_avt_web/ ./
 
-# node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 ships a non-root `node` user (uid 1000) out of the box.
+# node:22-alpine ships a non-root `node` user (uid 1000) out of the box.
 USER node
 
 RUN npm run build
