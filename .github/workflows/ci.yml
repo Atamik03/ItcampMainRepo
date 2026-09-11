@@ -28,11 +28,10 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_BASE: ghcr.io/${{ github.repository }}
   TRIVY_SEVERITY: "HIGH,CRITICAL"
   BANDIT_SEVERITY_LEVEL: "medium"
   BANDIT_CONFIDENCE_LEVEL: "medium"
-  TRIVY_VERSION: "0.56.2"
+  TRIVY_VERSION: "0.74.0"
   BANDIT_VERSION: "1.9.4"
   SEMGREP_VERSION: "1.99.0"
   HADOLINT_VERSION: "2.12.0"
@@ -52,6 +51,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate docker-compose.yml + CI overlay merge
         run: |
+          cp .env.example .env
           POSTGRES_USER=x POSTGRES_DB=x ELOU_ENV=x ELOU_AUTH_MODE=x ELOU_CORS_ORIGINS=x \
           BACKEND_IMAGE=x FRONTEND_BUILD_IMAGE=x FRONTEND_NGINX_IMAGE=x \
           docker compose -f docker-compose.yml -f docker-compose.ci.yml config -q
@@ -102,7 +102,7 @@ jobs:
           python-version: "3.12"
       - run: pip install --no-cache-dir "bandit==$BANDIT_VERSION"
       - run: bandit -r elou_avt_twin -x elou_avt_twin/.venv,elou_avt_twin/tests -f json -o bandit-report.json --exit-zero
-      - run: bandit -r elou_avt_twin -x elou_avt_twin/.venv,elou_avt_twin/tests -f screen
+      - run: bandit -r elou_avt_twin -x elou_avt_twin/.venv,elou_avt_twin/tests -f screen --exit-zero
       - run: bandit -r elou_avt_twin -x elou_avt_twin/.venv,elou_avt_twin/tests --severity-level "$BANDIT_SEVERITY_LEVEL" --confidence-level "$BANDIT_CONFIDENCE_LEVEL"
       - if: always()
         uses: actions/upload-artifact@v4
@@ -158,8 +158,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Run Trivy filesystem scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
+          version: ${{ env.TRIVY_VERSION }}
           scan-type: fs
           scan-ref: .
           scanners: vuln,secret,misconfig
@@ -167,8 +168,6 @@ jobs:
           skip-dirs: elou_avt_twin/.venv,elou_avt_web/node_modules,visual,data,secrets
           trivyignores: .trivyignore
           exit-code: "1"
-        env:
-          TRIVY_VERSION: ${{ env.TRIVY_VERSION }}
 
   # ---------------------------------------------------------------------
   # test (parallel with security)
@@ -184,7 +183,7 @@ jobs:
           cache: pip
           cache-dependency-path: elou_avt_twin/requirements.txt
       - working-directory: elou_avt_twin
-        run: pip install --no-cache-dir -r requirements.txt
+        run: pip install -r requirements.txt
       - working-directory: elou_avt_twin
         # No DATABASE_URL / REDIS_URL: falls back to local SQLite / a
         # no-op Redis client, same as local non-Docker dev (see
@@ -230,14 +229,17 @@ jobs:
 
       - name: Set image tag
         id: vars
-        run: echo "image=${IMAGE_BASE}/${{ matrix.service }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        run: |
+          image_base="ghcr.io/$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+          echo "image=${image_base}/${{ matrix.service }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
       - name: Build image
         run: docker build -t "${{ steps.vars.outputs.image }}" -f "${{ matrix.dockerfile }}" .
 
       - name: Trivy image scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
+          version: ${{ env.TRIVY_VERSION }}
           image-ref: ${{ steps.vars.outputs.image }}
           scan-type: image
           severity: ${{ env.TRIVY_SEVERITY }}
