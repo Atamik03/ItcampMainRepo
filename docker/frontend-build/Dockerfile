@@ -37,24 +37,26 @@ WORKDIR /app
 # current rather than whatever shipped with this particular Alpine
 # rebuild.
 #
-# The `cd .../npm && npm install tar js-yaml --no-save` that follows
-# fixes something npm@latest alone does not: npm vendors tar/js-yaml as
-# PRIVATE dependencies inside its own node_modules (not the global
-# node_modules any `npm install -g <pkg>` would touch), and npm@latest
-# (12.0.2) itself still pins tar to ^7.5.19 and js-yaml transitively --
-# both resolve to the OLDEST version satisfying that range, which is
-# still inside the vulnerable range for CVE-2026-73566 (fix: 7.5.21)
-# and CVE-2026-84375 (fix: 4.3.2), confirmed via this pipeline's own
-# Trivy image scan even after the node:22-alpine + npm@latest change
-# above. Upgrading the copies inside npm's own node_modules directly is
-# the only way to reach the fixed versions without npm itself cutting a
-# new release.
+# The `npm install --prefix "$(npm root -g)/npm" tar js-yaml --no-save`
+# that follows fixes something npm@latest alone does not: npm vendors
+# tar/js-yaml as PRIVATE dependencies inside its own node_modules (not
+# the global node_modules any `npm install -g <pkg>` would touch), and
+# npm@latest (12.0.2) itself still pins tar to ^7.5.19 and js-yaml
+# transitively -- both resolve to the OLDEST version satisfying that
+# range, which is still inside the vulnerable range for CVE-2026-73566
+# (fix: 7.5.21) and CVE-2026-84375 (fix: 4.3.2), confirmed via this
+# pipeline's own Trivy image scan even after the node:22-alpine +
+# npm@latest change above. Upgrading the copies inside npm's own
+# node_modules directly is the only way to reach the fixed versions
+# without npm itself cutting a new release. `--prefix` instead of `cd`
+# (hadolint DL3003: use WORKDIR, not cd, to change directory -- `cd` in
+# a RUN here would only need to apply to one command in the chain, so
+# WORKDIR itself is the wrong tool; --prefix avoids `cd` entirely).
 # Combined into one RUN with the chown above (hadolint DL3059: no
 # consecutive RUNs).
 RUN chown node:node /app \
     && npm install -g npm@latest \
-    && cd "$(npm root -g)/npm" \
-    && npm install tar@^7.5.21 js-yaml@^4.3.2 --no-save
+    && npm install --prefix "$(npm root -g)/npm" tar@^7.5.21 js-yaml@^4.3.2 --no-save
 
 # Copy manifest files first for better Docker layer caching: `npm ci` only
 # re-runs when package.json/package-lock.json actually change.
