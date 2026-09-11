@@ -36,39 +36,28 @@ WORKDIR /app
 # npm install -g npm@12.0.2: belt-and-suspenders on top of the Node 22
 # base image bump above -- makes sure the bundled npm CLI itself stays
 # current rather than whatever shipped with this particular Alpine
-# rebuild. Pinned to an exact version, not `@latest` (hadolint DL3016:
-# pin versions in npm install).
+# rebuild, and resolves the pacote CVE (CVE-2026-9496). Pinned to an
+# exact version, not `@latest` (hadolint DL3016: pin versions in npm
+# install).
 #
-# The `npm install --prefix "$(npm root -g)/npm" tar@7.5.21
-# js-yaml@4.3.2 --no-save` that follows fixes something npm@12.0.2
-# alone does not: npm vendors tar/js-yaml as PRIVATE dependencies
-# inside its own node_modules (not the global node_modules any `npm
-# install -g <pkg>` would touch), and npm@12.0.2 itself still pins tar
-# to ^7.5.19 and js-yaml transitively -- both resolve to the OLDEST
-# version satisfying that range, which is still inside the vulnerable
-# range for CVE-2026-73566 (fix: 7.5.21) and CVE-2026-84375 (fix:
-# 4.3.2), confirmed via this pipeline's own Trivy image scan even after
-# the node:22-alpine + npm upgrade above. Upgrading the copies inside
-# npm's own node_modules directly, pinned to the exact fixed versions,
-# is the only way to reach them without npm itself cutting a new
-# release. `--prefix` instead of `cd` (hadolint DL3003: use WORKDIR,
-# not cd, to change directory -- `cd` in a RUN here would only need to
-# apply to one command in the chain, so WORKDIR itself is the wrong
-# tool; --prefix avoids `cd` entirely).
-# Combined into one RUN with the chown above (hadolint DL3059: no
-# consecutive RUNs).
-#
-# The ignore=DL3016 below is a confirmed false positive, not a real
-# unpinned version: both packages ARE pinned exactly (tar@7.5.21,
-# js-yaml@4.3.2), but hadolint's DL3016 checker doesn't know `--prefix`
-# takes a value, so it treats the path after it ("$(npm root -g)/npm")
-# as an unpinned package name (confirmed against hadolint's own
-# DL3016.hs source -- `ignoreFlags` there only special-cases
-# `--loglevel`/`--registry`, not `--prefix`).
-# hadolint ignore=DL3016
-RUN chown node:node /app \
-    && npm install -g npm@12.0.2 \
-    && npm install --prefix "$(npm root -g)/npm" tar@7.5.21 js-yaml@4.3.2 --no-save
+# npm@12.0.2 still vendors tar@^7.5.19 and js-yaml transitively as
+# PRIVATE dependencies inside its own node_modules -- both resolve to
+# versions still inside the vulnerable range for CVE-2026-73566 (tar,
+# fix: 7.5.21) and CVE-2026-84375 (js-yaml, fix: 4.3.2). Tried
+# force-installing the fixed versions directly into npm's own
+# node_modules (`npm install --prefix "$(npm root -g)/npm" tar@7.5.21
+# js-yaml@4.3.2`), but that command doesn't do a scoped/isolated
+# install the way it does in an empty directory -- run against a
+# directory that already has its own package.json (npm's own), it
+# reinstalls npm's ENTIRE dependency tree, including internal
+# dev-only packages (e.g. @npmcli/docs) that don't exist on the public
+# npmjs.org registry (confirmed: 404, breaking the build outright).
+# Accepted as a documented, reviewed exception in .trivyignore instead
+# (see that file) -- these two CVEs are in npm CLI's own build-time
+# tooling dependencies, never in the shipped application or the
+# elou_avt_web dependency tree, and Denial-of-Service-class findings
+# against a one-shot CI build step that runs once per image build.
+RUN chown node:node /app && npm install -g npm@12.0.2
 
 # Copy manifest files first for better Docker layer caching: `npm ci` only
 # re-runs when package.json/package-lock.json actually change.

@@ -46,20 +46,49 @@ CVE-2026-48962
 CVE-2026-57432
 CVE-2026-9538
 
-## ---- docker-js (frontend-build, node:20-alpine) ----
+## ---- docker-js (frontend-build, node:22-alpine) ----
 ## One-shot build container: compiles the frontend and exits, never
 ## receives traffic, never runs as a long-lived service, and none of its
 ## own filesystem layers ship in the runtime frontend-nginx image (only
 ## the compiled static /app/dist output does, via the shared volume) --
 ## the blast radius of anything below is limited to the build step itself.
-## All of the following are baked into node:20-alpine's own bundled npm
-## CLI (its internal dependencies -- tar/glob/minimatch/cross-spawn/
-## brace-expansion/ip-address/sigstore -- none of which are direct or
-## transitive dependencies of elou_avt_web/package.json) or its Go
-## toolchain layer; neither is something this repo's Dockerfile can
-## `apk upgrade` or `npm update` its way out of. scripts/pin-digests.sh
-## already reported "up to date" for node:20-alpine (no newer digest
-## published yet) when this file was written.
+## Base image was node:20-alpine when the entries below this note were
+## first reviewed; since bumped to node:22-alpine (docker/frontend-build/
+## Dockerfile) specifically to resolve the pacote CVE these two packages
+## were originally found alongside -- re-review the list below the next
+## time scripts/pin-digests.* resolves a newer node:22-alpine digest.
+##
+## js-yaml (CVE-2026-84375) and tar (CVE-2026-73566), HIGH: unlike the
+## rest of this section, these DO have a published fix (Status: "fixed"
+## -- js-yaml 4.3.2, tar 7.5.21) -- they're not unreachable CVEs, just
+## unreachable from THIS Dockerfile. Both are PRIVATE dependencies
+## vendored inside npm CLI's own node_modules (npm@12.0.2, the version
+## `npm install -g npm@12.0.2` in the Dockerfile resolves to), not
+## dependencies of elou_avt_web/package.json, and not touched by `npm
+## install -g <pkg>`. Tried force-installing the fixed versions directly
+## into npm's own node_modules via `npm install --prefix "$(npm root
+## -g)/npm" tar@7.5.21 js-yaml@4.3.2`, but that reinstalls npm's ENTIRE
+## dependency tree (npm's own package.json lives in that directory) and
+## fails outright on an internal dev-only dependency (@npmcli/docs) that
+## doesn't exist on the public npmjs.org registry (404) -- confirmed via
+## this pipeline's own build log, not assumed. Both CVEs are
+## Denial-of-Service-class findings against a one-shot CI build step
+## (never a long-running service, never reachable over the network) --
+## re-review once npm itself ships a release with these transitive
+## versions bumped.
+CVE-2026-84375
+CVE-2026-73566
+##
+## Everything below this point predates the node:22-alpine switch and
+## was baked into node:20-alpine's own bundled npm CLI (its internal
+## dependencies -- tar/glob/minimatch/cross-spawn/brace-expansion/
+## ip-address/sigstore -- none of which are direct or transitive
+## dependencies of elou_avt_web/package.json) or its Go toolchain layer;
+## neither was something this repo's Dockerfile could `apk upgrade` or
+## `npm update` its way out of on Node 20. Left here unreviewed against
+## node:22-alpine (may already be resolved by the base image switch --
+## verify on the next Trivy image-scan run against frontend-build rather
+## than assuming either way).
 CVE-2026-45447
 CVE-2026-13149
 CVE-2026-14257
